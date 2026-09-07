@@ -18,31 +18,16 @@
 
 > **targetSdk 固定 35，勿升 36**：Android 16 对 targetSdk 36+ 的应用把媒体权限强制走相册选择器隔离模式，`MediaStore` 视频查询恒返回空（真机+模拟器均实测复现），首页网格会空白。35 下正常。
 
-## 架构与关键文件
+## 架构
 
-路径：`app/src/main/java/com/dashcam/editor/`
+单模块 `:app`，包路径 `app/src/main/java/com/dashcam/editor/`：
 
-| 文件 | 职责 |
-|---|---|
-| `MainActivity.kt` | 入口 Activity：SAF 多选导入、系统分享入口接收视频、页面切换；configChanges 自持横竖屏状态 |
-| `ui/AppModel.kt` | 全局应用状态（clip 列表、选区、播放位置等），Activity 不重建所以 remember 即可保状态 |
-| `ui/LibraryScreen.kt` | 首页缩略图网格，多选视频按点选顺序插入开头/末尾/片段之间 |
-| `ui/EditorScreen.kt` | 编辑器主界面：播放器、时间轴、打点（入点=此刻/出点=此刻 + ±1 帧微调）、逐帧步进 |
-| `ui/ExportSheet.kt` | 导出参数面板（分辨率/帧率/画质/编码/硬解硬编/精确或快速模式）与导出中的进度、倍速显示 |
-| `ui/InsertVideoPicker.kt` | 插入视频选择器 |
-| `ui/ShotsGallery.kt` | 截图画廊：查看 / 分享 / 删除 |
-| `ui/Theme.kt` | iOS 18 设计令牌与 `IosBar`/`IosGroup`/`IosSegmented`/`IosFilledButton`/`IosAction`/`IosNavBar` 组件；全宽工具条一律直角 + 0.5dp 发丝线 |
-| `media/PlayerController.kt` | ExoPlayer 封装：多 clip 顺序播放、EXACT seek、按源帧率逐帧步进（29.97/59.94 按分数处理） |
-| `media/Probe.kt` | `ClipInfo` 与 `MediaLibrary`：用 MediaMetadataRetriever + MediaExtractor 探测片源（**FFprobeKit 一律不可用**，会永久挂起） |
-| `media/FfExec.kt` | ffmpeg 统一异步执行（executeAsync + CompletableDeferred + 超时）；**禁止同步 `execute()`**（会挂起） |
-| `export/ExportEngine.kt` | 导出管线：输入侧预滚 2s + 输出侧精确丢帧的裁剪 seek、concat 跨段合并、硬解硬编→软解硬编→硬解x264→x264 回退链、输出实际时长校验不足 80% 自动回退下一级 |
-| `export/MediaStoreSaver.kt` | 导出成品 / 截图写入 MediaStore（`Movies/dashcam-editor/`、`Pictures/dashcam-editor/`） |
-| `shot/FrameShot.kt` | 原画质抽帧截图（源分辨率），可选 2× lanczos 锐化放大 |
-| `shot/ViewportCrop.kt` | 缩放视口裁剪 |
-| `timeline/Filmstrip.kt` / `TimelineBar.kt` | 时间轴胶片条与可拖双柄 |
-| `zoom/Zoomable.kt` | 双指缩放（最高 8×）、单指平移、双击复位；逐帧步进时缩放位置保持不变 |
-| `util/Tc.kt` | 时间码（时:分:秒.帧号）格式化 |
-| `com/arthenica/smartexception/java/Exceptions.java` | ffmpeg-kit POM 漏声明依赖的同包名 stub（**勿删**，缺失会 NoClassDefFoundError） |
+- `MainActivity.kt` — 入口：SAF / 分享导入、页面切换；configChanges 自持横竖屏状态
+- `ui/` — 界面与状态：`AppModel`（全局状态）、`LibraryScreen`（首页网格、多选插入）、`EditorScreen`（编辑器主界面）、`ExportSheet`（导出面板）、`ShotsGallery`（截图画廊）、`Theme.kt`（iOS 18 设计令牌与 `Ios*` 组件）
+- `media/` — `PlayerController`（ExoPlayer 封装、EXACT seek、逐帧步进）、`Probe`（片源探测）、`FfExec`（ffmpeg 异步执行）
+- `export/` — `ExportEngine`（导出管线）、`MediaStoreSaver`（成品入相册）
+- `shot/` `zoom/` `timeline/` `util/` — 截图、缩放平移、时间轴、时间码
+- `com/arthenica/smartexception/java/Exceptions.java` — ffmpeg-kit 缺失依赖 stub，**勿删**
 
 ## 修改原则
 
