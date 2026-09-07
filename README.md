@@ -1,0 +1,56 @@
+# 记录仪剪辑 (dashcam-editor)
+
+行车记录仪违法举报视频处理工具（Android）。针对剪映等通用剪辑器在"违法举报"场景的痛点设计：**打点不用拖、逐帧能放大、截图原画质、跨界裁剪一步出**。
+
+## 功能
+
+| 功能 | 说明 |
+|---|---|
+| 裁剪 | 播放中一键【入点=此刻】/【出点=此刻】打点，±1帧按钮微调，时间轴手柄可拖 |
+| 合并再裁剪 | 通过首页式缩略图网格多选视频，按点选顺序插入开头、末尾或任意片段之间；入出点可跨文件边界，导出自动 concat |
+| 导出 | 分辨率：原始/2160p(4K)/1440p/1080p/720p/480p；帧率：原始/60/50/30/25/24/15；画质三档；H.264 或 HEVC；硬解/硬编开关；精确（重编码帧精确）或快速（流复制秒出、关键帧对齐）模式；导出中显示编解码路径、实时倍速与预计剩余 |
+| 逐帧 | ‹帧/帧› 按钮按源帧率步进（29.97/59.94 自动按分数处理），时间码显示 时:分:秒.帧号 |
+| 放大 | 播放器双指缩放（最高8×）、单指平移、双击复位；**逐帧步进时缩放位置保持不变**（盯车牌连续确认） |
+| 截图 | 一键原画质抽帧（源分辨率），可勾选 2× lanczos 锐化放大，存相册 `Pictures/dashcam-editor/`，应用内可查看/分享/删除 |
+| 分享入口 | 系统相册/文件管理器"分享到本应用"直接进入导入 |
+
+导出文件保存在 `Movies/dashcam-editor/`（相册可见）。
+
+## 构建
+
+```
+要求：JDK 21、Android SDK（platform 37）、本仓库
+gradlew assembleDebug      # 调试包
+gradlew assembleRelease    # 正式包（keystore/dashcam.jks，密码 dashcam2026）
+```
+
+- 命令行构建需走代理时：`GRADLE_OPTS="-Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort=<port>" gradlew assembleDebug`
+- 本机 platform 37 是手动安装的（`platform-37.0_r02.zip` 解压到 `<sdk>/platforms/android-37`），换机器构建需同样处理
+
+技术栈：Kotlin + Jetpack Compose（Material 3 底座 + `ui/Theme.kt` 里的 iOS 18 设计令牌）、Media3 ExoPlayer 1.11（TextureView + EXACT seek）、`dev.ffmpegkit-maintained:ffmpeg-kit-full-gpl:8.1.7`（FFmpeg 8.1，含 x264 与 MediaCodec 硬编）、AGP 9.4 / Gradle 9.6 / compileSdk 37 / **targetSdk 35** / minSdk 24。
+
+界面遵循 `ui/Theme.kt` 中的 `Ios` 令牌：圆角只有卡片 12 / 控件 10 / 分段 9 / 胶囊几档，**全宽工具条一律直角 + 0.5dp 发丝线**，只有浮在内容之上的弹层、卡片、胶囊才带圆角——避免大小圆角互相打断造成的割裂感。新增控件请复用 `IosBar`/`IosGroup`/`IosSegmented`/`IosFilledButton`/`IosAction`/`IosNavBar`，不要再写裸的 `RoundedCornerShape(18.dp)` 之类。
+
+> **targetSdk 固定 35，勿升 36**：Android 16 对 targetSdk 36+ 的应用把媒体权限强制走相册选择器隔离模式，`MediaStore` 视频查询恒返回空（真机+模拟器均实测复现），首页网格会空白。35 下正常。
+
+## 关键实现说明
+
+1. **ffmpeg-kit 维护分支的两个坑**（已内置修复，勿删）：
+   - POM 漏声明 `com.arthenica.smartexception-java`（且原库已下架）→ 项目内置同包名 stub 类 `com/arthenica/smartexception/java/Exceptions.java`，缺失会 NoClassDefFoundError；
+   - 未打包 ffprobe 原生库，**FFprobeKit 一律不可用**（会永久挂起）→ 探测用系统 MediaMetadataRetriever + MediaExtractor。
+2. **ffmpeg 同步 `execute()` 会挂起** → 所有调用统一走 `FfExec`（executeAsync + CompletableDeferred + 超时）。
+3. **裁剪 seek 用「输入侧预滚 2s + 输出侧精确丢帧」**：纯输出侧 `-ss` 会把入点之前的每一帧都解一遍再丢掉，4K 片源上这是导出耗时的主要来源；纯输入侧 `-ss` 在目标靠近文件头时又可能是 no-op seek（多出开头帧）。因此输入侧只 seek 到 `入点-2s`（GOP 再长也只会落到更早的关键帧，精度不受影响），剩下 2s 交给输出侧 `-ss` 丢弃；入点本身 <2s 时退化成纯输出侧写法。PC ffmpeg 9 实测：64s/4K60 源、入点 55s，两种写法选中帧的 framemd5 完全一致，耗时 12.6s → 4.4s；流复制模式下输出同样是 2.03s/122 帧，语义不变。跨段仍用 concat demuxer 的 inpoint/outpoint。
+4. **解码也要用 MediaCodec**：4K 软解本身就很吃 CPU。`-c:v h264_mediacodec`/`hevc_mediacodec` 作为输入选项前置（按片源 MIME 选，且以 `ffmpeg -decoders` 探测结果为准）。导出按 硬解+硬编 → 软解+硬编 → 硬解+x264 → x264 逐级回退，每级都用输出实际时长验证。
+5. **部分设备 mediacodec 会"成功"地输出 0 帧** → 导出后校验实际时长，不足选区 80% 自动回退下一级。
+6. **x264 预设随分辨率下调**（≥2000p 用 ultrafast、≥1300p 用 superfast），否则手机上软编一段 20s 的 4K 能跑几分钟。
+7. 帧率探测来自 MediaFormat，个别设备对 29.97 源返回整数 30 → 帧号显示与导出首帧可能 ±1 帧，属系统 API 精度限制。
+
+## 已验证（模拟器 API 36 实测）
+
+- SAF 多选导入 → 2 段拼接 18s 时间轴；分享入口导入
+- 播放时间码推进；逐帧步进帧号严格 +1；打点入/出/时长精确；横竖屏状态保持（configChanges）
+- 截图 1920×1080 原画质入相册
+- 精确导出：打点帧5起 3 秒选区 → 输出 89 帧 2.97s、首帧=打点帧（±1帧内）、帧率 30000/1001 保持
+- 跨段 concat 与输出侧裁剪的帧精度在 PC ffmpeg 8/9 双重验证
+
+真机（尤其 4K/60 硬编速度、真实记录仪 VFR 片源）请安装 release 包实测。
