@@ -1,10 +1,10 @@
-# AGENTS.md — dashcam-editor（记录仪剪辑）
+# AGENTS.md — dashcam-editor
 
 面向 AI 编码助手 / 自动化代理的项目说明。修改本仓库代码前请先读完本文。
 
 ## 项目概览
 
-**dashcam-editor（记录仪剪辑）** 是 Android 行车记录仪违法举报视频处理工具：打点不用拖、逐帧能放大、截图原画质、跨文件裁剪一步出。
+**dashcam-editor** 是 Android 视频处理工具：打点不用拖、逐帧能放大、截图原画质、跨文件裁剪一步出。
 
 | 项 | 值 |
 |---|---|
