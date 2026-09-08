@@ -11,7 +11,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -68,6 +68,9 @@ data class LibVideo(
     val durationMs: Long,
     val dateAdded: Long,
     val displayName: String = "",
+    val width: Int = 0,
+    val height: Int = 0,
+    val sizeBytes: Long = 0,
 )
 
 /** 首页：本机视频网格（相册式），点开即进入编辑 */
@@ -80,6 +83,7 @@ fun LibraryScreen(app: AppModel, shareUris: androidx.compose.runtime.MutableStat
     var importing by remember { mutableStateOf(false) }
     var importLabel by remember { mutableStateOf("") }
     var videos by remember { mutableStateOf<List<LibVideo>>(emptyList()) }
+    var infoVideo by remember { mutableStateOf<LibVideo?>(null) }
 
     fun neededPermission(): String = when {
         Build.VERSION.SDK_INT >= 33 -> Manifest.permission.READ_MEDIA_VIDEO
@@ -109,9 +113,7 @@ fun LibraryScreen(app: AppModel, shareUris: androidx.compose.runtime.MutableStat
             )
             importing = false
             if (list.isNotEmpty()) {
-                app.clips = list
-                app.validateRange()
-                app.shots = emptyList()
+                app.loadClips(list)
                 app.screen = Screen.Edit
             }
         }
@@ -128,6 +130,37 @@ fun LibraryScreen(app: AppModel, shareUris: androidx.compose.runtime.MutableStat
         if (uris.isNotEmpty()) {
             shareUris.value = emptyList()
             openEditor(uris)
+        }
+    }
+
+    // 删除：可直接删的立即删；系统文件弹出系统确认框，确认后整表刷新
+    var deleteTarget by remember { mutableStateOf<android.net.Uri?>(null) }
+    val deleteConfirm = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { res ->
+        val target = deleteTarget
+        deleteTarget = null
+        if (res.resultCode == android.app.Activity.RESULT_OK && target != null) {
+            scope.launch {
+                videos = loadVideos(context)
+                snackbar.showSnackbar("已删除")
+            }
+        }
+    }
+
+    fun requestDelete(video: LibVideo) {
+        scope.launch {
+            when (val r = withContext(Dispatchers.IO) { deleteVideo(context, video.uri) }) {
+                is VideoDeleteResult.Ok -> {
+                    videos = videos.filterNot { it.uri == video.uri }
+                    infoVideo = null
+                    snackbar.showSnackbar("已删除")
+                }
+                is VideoDeleteResult.Confirm -> {
+                    deleteTarget = video.uri
+                    infoVideo = null
+                    deleteConfirm.launch(androidx.activity.result.IntentSenderRequest.Builder(r.sender).build())
+                }
+                is VideoDeleteResult.Error -> snackbar.showSnackbar(r.message)
+            }
         }
     }
 
@@ -211,13 +244,17 @@ fun LibraryScreen(app: AppModel, shareUris: androidx.compose.runtime.MutableStat
                                 )
                             }
                             items(dayVideos, key = { it.uri.toString() }) { v ->
-                                VideoCell(video = v) { openEditor(listOf(v.uri)) }
+                                VideoCell(video = v, onClick = { openEditor(listOf(v.uri)) }, onLongClick = { infoVideo = v })
                             }
                         }
                     }
                 }
             }
         }
+    }
+
+    infoVideo?.let { v ->
+        VideoInfoSheet(video = v, onDismiss = { infoVideo = null }, onDelete = { requestDelete(v) })
     }
 }
 
@@ -259,8 +296,9 @@ internal fun groupByDay(videos: List<LibVideo>): List<Pair<String, List<LibVideo
         }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-internal fun VideoCell(video: LibVideo, onClick: () -> Unit) {
+internal fun VideoCell(video: LibVideo, onClick: () -> Unit, onLongClick: (() -> Unit)? = null) {
     val context = LocalContext.current
     var thumb by remember(video.uri) { mutableStateOf<ImageBitmap?>(null) }
     LaunchedEffect(video.uri) {
@@ -271,7 +309,7 @@ internal fun VideoCell(video: LibVideo, onClick: () -> Unit) {
             .fillMaxWidth()
             .aspectRatio(1f)
             .background(Ios.GroupedBackground)
-            .clickable(onClick = onClick),
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick),
     ) {
         thumb?.let { bmp ->
             Image(
@@ -314,7 +352,11 @@ internal suspend fun loadVideos(context: Context): List<LibVideo> = withContext(
         val list = ArrayList<LibVideo>()
         context.contentResolver.query(
             MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-            arrayOf(MediaStore.Video.Media._ID, MediaStore.Video.Media.DURATION, MediaStore.Video.Media.DATE_ADDED, MediaStore.Video.Media.DISPLAY_NAME),
+            arrayOf(
+                MediaStore.Video.Media._ID, MediaStore.Video.Media.DURATION, MediaStore.Video.Media.DATE_ADDED,
+                MediaStore.Video.Media.DISPLAY_NAME, MediaStore.Video.Media.WIDTH, MediaStore.Video.Media.HEIGHT,
+                MediaStore.Video.Media.SIZE,
+            ),
             null,
             null,
             "${MediaStore.Video.Media.DATE_ADDED} DESC",
@@ -323,6 +365,9 @@ internal suspend fun loadVideos(context: Context): List<LibVideo> = withContext(
             val durCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DURATION)
             val dateCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DATE_ADDED)
             val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DISPLAY_NAME)
+            val widthCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.WIDTH)
+            val heightCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.HEIGHT)
+            val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.SIZE)
             while (cursor.moveToNext()) {
                 val id = cursor.getLong(idCol)
                 list.add(
@@ -331,6 +376,9 @@ internal suspend fun loadVideos(context: Context): List<LibVideo> = withContext(
                         durationMs = cursor.getLong(durCol),
                         dateAdded = cursor.getLong(dateCol),
                         displayName = cursor.getString(nameCol) ?: "视频",
+                        width = cursor.getInt(widthCol),
+                        height = cursor.getInt(heightCol),
+                        sizeBytes = cursor.getLong(sizeCol),
                     ),
                 )
             }
@@ -341,7 +389,7 @@ internal suspend fun loadVideos(context: Context): List<LibVideo> = withContext(
         .getOrDefault(emptyList())
 }
 
-private suspend fun loadThumbnail(context: Context, uri: android.net.Uri): ImageBitmap? =
+internal suspend fun loadThumbnail(context: Context, uri: android.net.Uri): ImageBitmap? =
     withContext(Dispatchers.IO) {
         runCatching {
             val bmp = if (Build.VERSION.SDK_INT >= 29) {
@@ -357,3 +405,33 @@ private suspend fun loadThumbnail(context: Context, uri: android.net.Uri): Image
             bmp?.asImageBitmap()
         }.getOrNull()
     }
+
+/** 删除 MediaStore 视频的结果：直接成功 / 需要系统确认框 / 失败 */
+internal sealed interface VideoDeleteResult {
+    data class Ok(val count: Int) : VideoDeleteResult
+    data class Confirm(val sender: android.content.IntentSender) : VideoDeleteResult
+    data class Error(val message: String) : VideoDeleteResult
+}
+
+/**
+ * 删除一条视频：应用自建的文件可直接删；其他应用的文件在 Scoped Storage 下需要
+ * 系统确认（RecoverableSecurityException 的 IntentSender，或 API 30+ 的批量删除请求）。
+ */
+internal fun deleteVideo(context: Context, uri: android.net.Uri): VideoDeleteResult {
+    return try {
+        val n = context.contentResolver.delete(uri, null, null)
+        if (n > 0) VideoDeleteResult.Ok(n) else VideoDeleteResult.Error("未找到该视频，可能已被删除")
+    } catch (e: android.app.RecoverableSecurityException) {
+        VideoDeleteResult.Confirm(e.userAction.actionIntent.intentSender)
+    } catch (_: SecurityException) {
+        if (Build.VERSION.SDK_INT >= 30) {
+            runCatching {
+                VideoDeleteResult.Confirm(MediaStore.createDeleteRequest(context.contentResolver, listOf(uri)).intentSender)
+            }.getOrElse { VideoDeleteResult.Error("无法删除：${it.message}") }
+        } else {
+            VideoDeleteResult.Error("没有删除该视频的权限")
+        }
+    } catch (e: Exception) {
+        VideoDeleteResult.Error("删除失败：${e.message}")
+    }
+}

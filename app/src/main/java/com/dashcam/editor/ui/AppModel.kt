@@ -29,6 +29,18 @@ class AppModel {
 
     val totalMs: Long get() = clips.sumOf { it.durationMs }
 
+    /**
+     * 换片源：整批替换 clip 列表，选区与截图列表回到初始值。
+     * 不能用 validateRange() 代替——它只做钳位，新视频只要够长，
+     * 上一个视频的入出点就会原封不动地留下来。
+     */
+    fun loadClips(newClips: List<ClipInfo>) {
+        clips = newClips
+        inMs = 0
+        outMs = totalMs
+        shots = emptyList()
+    }
+
     /** Keep a trimmed range attached to the same content; a full selection stays full. */
     fun insertClips(index: Int, addedClips: List<ClipInfo>) {
         if (addedClips.isEmpty()) return

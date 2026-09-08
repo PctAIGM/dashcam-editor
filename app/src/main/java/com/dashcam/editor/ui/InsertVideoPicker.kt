@@ -3,6 +3,7 @@ package com.dashcam.editor.ui
 import android.Manifest
 import android.net.Uri
 import android.os.Build
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -22,6 +23,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.dashcam.editor.media.ClipInfo
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** Reuses the home library and thumbnails, with ordered selection and an insertion boundary. */
 @Composable
@@ -33,17 +37,49 @@ fun InsertVideoPicker(
     onInsert: (Int, List<Uri>) -> Unit,
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var granted by remember { mutableStateOf(hasVideoPermission(context)) }
     var videos by remember { mutableStateOf<List<LibVideo>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
     var selected by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var insertion by remember { mutableIntStateOf(clips.size) }
     var menuOpen by remember { mutableStateOf(false) }
+    var infoVideo by remember { mutableStateOf<LibVideo?>(null) }
+    var deleteTarget by remember { mutableStateOf<Uri?>(null) }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         granted = hasVideoPermission(context)
     }
     val files = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) {
         if (it.isNotEmpty()) onInsert(insertion, it)
+    }
+    val deleteConfirm = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { res ->
+        val target = deleteTarget
+        deleteTarget = null
+        if (res.resultCode == android.app.Activity.RESULT_OK && target != null) {
+            selected = selected - target
+            scope.launch {
+                videos = loadVideos(context)
+                Toast.makeText(context, "已删除", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    fun requestDelete(video: LibVideo) {
+        scope.launch {
+            when (val r = withContext(Dispatchers.IO) { deleteVideo(context, video.uri) }) {
+                is VideoDeleteResult.Ok -> {
+                    videos = videos.filterNot { it.uri == video.uri }
+                    selected = selected - video.uri
+                    infoVideo = null
+                }
+                is VideoDeleteResult.Confirm -> {
+                    deleteTarget = video.uri
+                    infoVideo = null
+                    deleteConfirm.launch(androidx.activity.result.IntentSenderRequest.Builder(r.sender).build())
+                }
+                is VideoDeleteResult.Error -> Toast.makeText(context, r.message, Toast.LENGTH_SHORT).show()
+            }
+        }
     }
     LaunchedEffect(granted) {
         loading = true
@@ -125,9 +161,9 @@ fun InsertVideoPicker(
                             items(items, key = { it.uri.toString() }) { video ->
                                 Column {
                                     Box {
-                                        VideoCell(video) {
+                                        VideoCell(video, onClick = {
                                             if (!busy) selected = if (video.uri in selected) selected - video.uri else selected + video.uri
-                                        }
+                                        }, onLongClick = { if (!busy) infoVideo = video })
                                         val order = selected.indexOf(video.uri)
                                         if (order >= 0) {
                                             Box(
@@ -154,5 +190,9 @@ fun InsertVideoPicker(
                 }
             }
         }
+    }
+
+    infoVideo?.let { v ->
+        VideoInfoSheet(video = v, onDismiss = { infoVideo = null }, onDelete = { requestDelete(v) })
     }
 }

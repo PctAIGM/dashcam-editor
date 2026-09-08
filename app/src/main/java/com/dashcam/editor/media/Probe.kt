@@ -84,27 +84,7 @@ object MediaLibrary {
         val retriever = MediaMetadataRetriever()
         try {
             retriever.setDataSource(path)
-            val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-            val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
-            val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
-            val rotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
-            val hasAudio = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO) == "yes"
-            val track = readVideoTrack(path)
-
-            if (width <= 0 || height <= 0 || durationMs <= 0L) return null
-            val effFps = if (track.first in 1.0..240.0) track.first else 30.0
-            val swap = rotation == 90 || rotation == 270
-            return ClipInfo(
-                filePath = path,
-                displayName = displayName,
-                durationMs = durationMs,
-                displayWidth = if (swap) height else width,
-                displayHeight = if (swap) width else height,
-                fps = effFps,
-                hasAudio = hasAudio,
-                rotationDegrees = rotation,
-                videoMime = track.second,
-            )
+            return buildInfo(retriever, displayName, readVideoTrack { it.setDataSource(path) })
         } catch (_: Exception) {
             return null
         } finally {
@@ -112,11 +92,51 @@ object MediaLibrary {
         }
     }
 
+    /** 直接探测 MediaStore Uri（不复制文件），供信息查看用；阻塞 IO，调用方自行切线程 */
+    fun probeUri(context: Context, uri: Uri, displayName: String): ClipInfo? {
+        val retriever = MediaMetadataRetriever()
+        try {
+            retriever.setDataSource(context, uri)
+            return buildInfo(retriever, displayName, readVideoTrack { it.setDataSource(context, uri, null) })
+        } catch (_: Exception) {
+            return null
+        } finally {
+            runCatching { retriever.release() }
+        }
+    }
+
+    private fun buildInfo(
+        retriever: MediaMetadataRetriever,
+        displayName: String,
+        track: Pair<Double, String>,
+    ): ClipInfo? {
+        val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+        val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+        val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+        val rotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+        val hasAudio = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO) == "yes"
+
+        if (width <= 0 || height <= 0 || durationMs <= 0L) return null
+        val effFps = if (track.first in 1.0..240.0) track.first else 30.0
+        val swap = rotation == 90 || rotation == 270
+        return ClipInfo(
+            filePath = "",
+            displayName = displayName,
+            durationMs = durationMs,
+            displayWidth = if (swap) height else width,
+            displayHeight = if (swap) width else height,
+            fps = effFps,
+            hasAudio = hasAudio,
+            rotationDegrees = rotation,
+            videoMime = track.second,
+        )
+    }
+
     /** 返回 (帧率, 视频轨 MIME)；帧率优先浮点（29.97/59.94 精确），回退整数 */
-    private fun readVideoTrack(path: String): Pair<Double, String> {
+    private fun readVideoTrack(setSource: (MediaExtractor) -> Unit): Pair<Double, String> {
         val extractor = MediaExtractor()
         try {
-            extractor.setDataSource(path)
+            setSource(extractor)
             for (i in 0 until extractor.trackCount) {
                 val format = extractor.getTrackFormat(i)
                 val mime = format.getString(MediaFormat.KEY_MIME) ?: continue
