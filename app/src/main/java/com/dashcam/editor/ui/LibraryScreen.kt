@@ -53,6 +53,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -227,13 +228,13 @@ fun LibraryScreen(app: AppModel, shareUris: androidx.compose.runtime.MutableStat
                 } else {
                     val groups = remember(videos) { groupByDay(videos) }
                     LazyVerticalGrid(
-                        columns = GridCells.Fixed(3),
+                        columns = GridCells.Adaptive(112.dp),
                         modifier = Modifier.weight(1f),
                         horizontalArrangement = Arrangement.spacedBy(2.dp),
-                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         groups.forEach { (dayLabel, dayVideos) ->
-                            item(key = "h_$dayLabel", span = { GridItemSpan(3) }) {
+                            item(key = "h_$dayLabel", span = { GridItemSpan(maxLineSpan) }) {
                                 Text(
                                     dayLabel,
                                     style = MaterialTheme.typography.titleMedium,
@@ -244,7 +245,12 @@ fun LibraryScreen(app: AppModel, shareUris: androidx.compose.runtime.MutableStat
                                 )
                             }
                             items(dayVideos, key = { it.uri.toString() }) { v ->
-                                VideoCell(video = v, onClick = { openEditor(listOf(v.uri)) }, onLongClick = { infoVideo = v })
+                                Column {
+                                    VideoCell(video = v, onClick = { openEditor(listOf(v.uri)) }, onLongClick = { infoVideo = v })
+                                    Text(v.displayName, modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
+                                        style = MaterialTheme.typography.bodySmall, color = Ios.SecondaryLabel,
+                                        minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                }
                             }
                         }
                     }
@@ -298,7 +304,7 @@ internal fun groupByDay(videos: List<LibVideo>): List<Pair<String, List<LibVideo
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-internal fun VideoCell(video: LibVideo, onClick: () -> Unit, onLongClick: (() -> Unit)? = null) {
+internal fun VideoCell(video: LibVideo, onClick: (() -> Unit)?, onLongClick: (() -> Unit)? = null, showDuration: Boolean = true) {
     val context = LocalContext.current
     var thumb by remember(video.uri) { mutableStateOf<ImageBitmap?>(null) }
     LaunchedEffect(video.uri) {
@@ -309,7 +315,7 @@ internal fun VideoCell(video: LibVideo, onClick: () -> Unit, onLongClick: (() ->
             .fillMaxWidth()
             .aspectRatio(1f)
             .background(Ios.GroupedBackground)
-            .combinedClickable(onClick = onClick, onLongClick = onLongClick),
+            .let { if (onClick != null) it.combinedClickable(onClick = onClick, onLongClick = onLongClick) else it },
     ) {
         thumb?.let { bmp ->
             Image(
@@ -319,7 +325,7 @@ internal fun VideoCell(video: LibVideo, onClick: () -> Unit, onLongClick: (() ->
                 modifier = Modifier.fillMaxSize(),
             )
         }
-        Text(
+        if (showDuration) Text(
             Tc.formatShort(video.durationMs),
             color = Color.White,
             fontSize = 10.sp,

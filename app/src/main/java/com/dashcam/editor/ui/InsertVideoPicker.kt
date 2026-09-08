@@ -3,14 +3,23 @@ package com.dashcam.editor.ui
 import android.Manifest
 import android.net.Uri
 import android.os.Build
+import android.provider.OpenableColumns
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.*
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ChevronLeft
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -18,8 +27,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.dashcam.editor.media.ClipInfo
@@ -37,11 +48,14 @@ fun InsertVideoPicker(
     onInsert: (Int, List<Uri>) -> Unit,
 ) {
     val context = LocalContext.current
+    val configuration = LocalConfiguration.current
+    val landscape = configuration.screenWidthDp > configuration.screenHeightDp
     val scope = rememberCoroutineScope()
     var granted by remember { mutableStateOf(hasVideoPermission(context)) }
     var videos by remember { mutableStateOf<List<LibVideo>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
     var selected by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var fileVideos by remember { mutableStateOf<List<LibVideo>>(emptyList()) }
     var insertion by remember { mutableIntStateOf(clips.size) }
     var menuOpen by remember { mutableStateOf(false) }
     var infoVideo by remember { mutableStateOf<LibVideo?>(null) }
@@ -49,8 +63,21 @@ fun InsertVideoPicker(
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         granted = hasVideoPermission(context)
     }
-    val files = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) {
-        if (it.isNotEmpty()) onInsert(insertion, it)
+    val files = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) scope.launch {
+            val added = withContext(Dispatchers.IO) {
+                uris.map { uri ->
+                    val name = runCatching {
+                        context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                            if (cursor.moveToFirst()) cursor.getString(0) else null
+                        }
+                    }.getOrNull() ?: "文件视频"
+                    LibVideo(uri, 0L, 0L, name)
+                }
+            }
+            fileVideos = (fileVideos + added).distinctBy { it.uri }
+            selected = (selected + uris).distinct()
+        }
     }
     val deleteConfirm = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { res ->
         val target = deleteTarget
@@ -106,7 +133,7 @@ fun InsertVideoPicker(
                         .clickable(enabled = !busy) { menuOpen = true }
                         .padding(horizontal = Ios.Gutter, vertical = 10.dp),
                 ) {
-                    Text("插入位置", style = MaterialTheme.typography.bodySmall, color = Ios.SecondaryLabel)
+                    if (!landscape) Text("插入位置", style = MaterialTheme.typography.bodySmall, color = Ios.SecondaryLabel)
                     Text(
                         "${positionLabel(insertion)} ▾",
                         style = MaterialTheme.typography.bodyLarge,
@@ -124,7 +151,7 @@ fun InsertVideoPicker(
                     }
                 }
                 IosSeparator(inset = 0.dp)
-                Text(
+                if (!landscape) Text(
                     "按点选顺序拼接，可多选；再次点击取消选择",
                     Modifier.padding(horizontal = Ios.Gutter, vertical = 10.dp),
                     style = MaterialTheme.typography.bodySmall,
@@ -153,9 +180,9 @@ fun InsertVideoPicker(
                     }
                 } else {
                     val groups = remember(videos) { groupByDay(videos) }
-                    LazyVerticalGrid(columns = GridCells.Fixed(3), modifier = Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    LazyVerticalGrid(columns = GridCells.Adaptive(112.dp), modifier = Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         groups.forEach { (day, items) ->
-                            item(span = { GridItemSpan(3) }) {
+                            item(span = { GridItemSpan(maxLineSpan) }) {
                                 Text(day, Modifier.padding(start = Ios.Gutter, top = 10.dp, bottom = 4.dp), style = MaterialTheme.typography.titleMedium)
                             }
                             items(items, key = { it.uri.toString() }) { video ->
@@ -181,8 +208,39 @@ fun InsertVideoPicker(
                         }
                     }
                 }
+                if (selected.isNotEmpty()) {
+                    IosSeparator(inset = 0.dp)
+                    if (!landscape) Row(Modifier.fillMaxWidth().padding(start = Ios.Gutter), verticalAlignment = Alignment.CenterVertically) {
+                        Text("已选 ${selected.size} 段 · 按下方顺序插入", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = Ios.SecondaryLabel)
+                        IosAction("清空", fontSize = 13.sp, enabled = !busy) { selected = emptyList() }
+                    }
+                    LazyRow(contentPadding = PaddingValues(horizontal = Ios.Gutter), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        itemsIndexed(selected, key = { _, uri -> uri.toString() }) { index, uri ->
+                            val video = (videos + fileVideos).firstOrNull { it.uri == uri } ?: LibVideo(uri, 0L, 0L, "视频")
+                            IosGroup(Modifier.width(168.dp).border(Ios.Hairline, Ios.Separator, RoundedCornerShape(Ios.RCard))) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Box(Modifier.size(44.dp)) { VideoCell(video, onClick = null, showDuration = false) }
+                                    Column(Modifier.weight(1f).padding(horizontal = 6.dp)) {
+                                        Text("第 ${index + 1} 段", style = MaterialTheme.typography.labelSmall, color = Ios.Blue)
+                                        Text(video.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
+                                    }
+                                }
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                    IconButton(enabled = !busy && index > 0, onClick = {
+                                        selected = selected.toMutableList().apply { add(index - 1, removeAt(index)) }
+                                    }) { Icon(Icons.Filled.ChevronLeft, "前移第 ${index + 1} 段") }
+                                    IconButton(enabled = !busy, onClick = { selected = selected - uri }) { Icon(Icons.Filled.Close, "取消第 ${index + 1} 段") }
+                                    IconButton(enabled = !busy && index < selected.lastIndex, onClick = {
+                                        selected = selected.toMutableList().apply { add(index + 1, removeAt(index)) }
+                                    }) { Icon(Icons.Filled.ChevronRight, "后移第 ${index + 1} 段") }
+                                }
+                            }
+                        }
+                        if (landscape) item { IosAction("清空", enabled = !busy, fontSize = 13.sp) { selected = emptyList() } }
+                    }
+                }
                 IosSeparator(inset = 0.dp)
-                Box(Modifier.padding(Ios.Gutter)) {
+                Box(Modifier.padding(horizontal = Ios.Gutter, vertical = 8.dp)) {
                     IosFilledButton(
                         if (busy) "正在拼接…" else "插入已选 ${selected.size} 段视频",
                         enabled = selected.isNotEmpty() && !busy,

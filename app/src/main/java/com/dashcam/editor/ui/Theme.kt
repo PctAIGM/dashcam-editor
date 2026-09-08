@@ -56,6 +56,8 @@ object Ios {
     val Stage = Color(0xFF000000)
     /** 悬浮在画面上的控件底色 */
     val Scrim = Color(0xFF1C1C1E).copy(alpha = 0.55f)
+    val SubtleScrim = Color(0xFF1C1C1E).copy(alpha = 0.32f)
+    val AccentFill = Blue.copy(alpha = 0.12f)
 
     /** 弹层 / 分组卡片 */
     val RCard = 12.dp

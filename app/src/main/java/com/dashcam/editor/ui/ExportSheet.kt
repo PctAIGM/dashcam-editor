@@ -1,5 +1,9 @@
 package com.dashcam.editor.ui
 
+import android.content.Context
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -20,6 +24,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableDoubleStateOf
 import androidx.compose.runtime.mutableFloatStateOf
@@ -61,16 +66,23 @@ fun ExportSheet(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val sheetState = rememberModalBottomSheetState()
+    val preferences = remember { context.getSharedPreferences("export_options", Context.MODE_PRIVATE) }
 
-    var resSel by remember { mutableIntStateOf(0) }
-    var fpsSel by remember { mutableIntStateOf(0) }
-    var quality by remember { mutableStateOf(Quality.MEDIUM) }
-    var hevc by remember { mutableStateOf(false) }
-    var fastCopy by remember { mutableStateOf(false) }
-    var useHw by remember { mutableStateOf(true) }
-    var hwDecode by remember { mutableStateOf(true) }
+    var resSel by remember { mutableIntStateOf(preferences.getInt("resolution", 0).coerceIn(RES_OPTIONS.indices)) }
+    var fpsSel by remember { mutableIntStateOf(preferences.getInt("fps", 0).coerceIn(FPS_OPTIONS.indices)) }
+    var quality by remember { mutableStateOf(Quality.entries[preferences.getInt("quality", Quality.MEDIUM.ordinal).coerceIn(Quality.entries.indices)]) }
+    var hevc by remember { mutableStateOf(preferences.getBoolean("hevc", false)) }
+    var fastCopy by remember { mutableStateOf(preferences.getBoolean("fastCopy", false)) }
+    var useHw by remember { mutableStateOf(preferences.getBoolean("useHw", true)) }
+    var hwDecode by remember { mutableStateOf(preferences.getBoolean("hwDecode", true)) }
     var exporting by remember { mutableStateOf(false) }
+    var advanced by remember { mutableStateOf(false) }
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true, confirmValueChange = { !exporting })
+    LaunchedEffect(resSel, fpsSel, quality, hevc, fastCopy, useHw, hwDecode) {
+        preferences.edit().putInt("resolution", resSel).putInt("fps", fpsSel).putInt("quality", quality.ordinal)
+            .putBoolean("hevc", hevc).putBoolean("fastCopy", fastCopy)
+            .putBoolean("useHw", useHw).putBoolean("hwDecode", hwDecode).apply()
+    }
     var progress by remember { mutableFloatStateOf(0f) }
     var speed by remember { mutableDoubleStateOf(0.0) }
     var stage by remember { mutableStateOf("") }
@@ -89,136 +101,122 @@ fun ExportSheet(
         sheetState = sheetState,
         containerColor = Ios.GroupedBackground,
     ) {
-        Column(
-            Modifier.padding(horizontal = Ios.Gutter).padding(bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Column {
-                Text("导出", style = MaterialTheme.typography.headlineSmall)
-                Text(
-                    "选区 ${Tc.formatShort(app.inMs)} → ${Tc.formatShort(app.outMs)} · " +
-                        "时长 ${Tc.formatShort(selDurMs)} · 跨 $entriesCount 段",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Ios.SecondaryLabel,
-                )
-            }
-            IosGroup {
-                PickerCell("分辨率", RES_LABELS, resSel, enabled = !fastCopy) { resSel = it }
-                IosSeparator()
-                PickerCell("帧率", FPS_LABELS, fpsSel, enabled = !fastCopy) { fpsSel = it }
-                IosSeparator()
-                PickerCell("画质", listOf("高", "中", "低"), quality.ordinal, enabled = !fastCopy) {
-                    quality = Quality.entries[it]
+        Column(Modifier.fillMaxHeight(0.9f)) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = Ios.Gutter), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("导出", style = MaterialTheme.typography.headlineSmall)
+                    Text("选区 ${Tc.formatShort(app.inMs)} → ${Tc.formatShort(app.outMs)} · ${Tc.formatShort(selDurMs)} · $entriesCount 段",
+                        style = MaterialTheme.typography.bodySmall, color = Ios.SecondaryLabel)
                 }
+                IosAction("关闭", enabled = !exporting, fontSize = 15.sp, onClick = onDismiss)
             }
-
-            Column {
-                IosGroupLabel("编码")
+            Column(
+                Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(Ios.Gutter),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
                 IosGroup {
-                    SwitchCell(
-                        title = "快速模式（流复制）",
-                        detail = "秒级完成，但剪切点会对齐到最近关键帧，分辨率与帧率跟随原始",
-                        checked = fastCopy,
-                        onCheckedChange = { fastCopy = it },
-                    )
-                    IosSeparator()
-                    SwitchCell(
-                        title = "硬件解码",
-                        detail = if (hwDecoderAvailable) "4K 片源提速最明显；失败会自动退回软解" else "本机 ffmpeg 无 MediaCodec 解码器",
-                        checked = hwDecode && hwDecoderAvailable && !fastCopy,
-                        enabled = hwDecoderAvailable && !fastCopy,
-                        onCheckedChange = { hwDecode = it },
-                    )
-                    IosSeparator()
-                    SwitchCell(
-                        title = "硬件编码",
-                        detail = if (hwEncoderAvailable) "MediaCodec 编码，失败会自动退回 x264" else "本机 ffmpeg 无 MediaCodec 编码器",
-                        checked = useHw && hwEncoderAvailable && !fastCopy,
-                        enabled = hwEncoderAvailable && !fastCopy,
-                        onCheckedChange = { useHw = it },
-                    )
-                    IosSeparator()
-                    SwitchCell(
-                        title = "HEVC（更省体积）",
-                        detail = "需要硬件编码，部分播放器兼容性较差",
-                        checked = hevc && useHw && hw.getOrElse(1) { false } && !fastCopy,
-                        enabled = useHw && hw.getOrElse(1) { false } && !fastCopy,
-                        onCheckedChange = { hevc = it },
-                    )
+                    PickerCell("裁剪方式", listOf("精确裁剪", "快速裁剪"), if (fastCopy) 1 else 0, enabled = !exporting) { fastCopy = it == 1 }
+                    Text(if (fastCopy) "速度快，剪切点按关键帧对齐，保留原始分辨率与帧率。" else "按选区精确裁剪，可调整输出画质。",
+                        modifier = Modifier.padding(horizontal = Ios.Gutter).padding(bottom = 12.dp),
+                        style = MaterialTheme.typography.bodySmall, color = Ios.SecondaryLabel)
                 }
-            }
-
-            if (!fastCopy && resSel == 0 && srcHeight >= 2000) {
-                Text(
-                    "原始分辨率（${srcHeight}p）重编码最慢。举报取证选 1080p 通常快 3～4 倍，车牌依然可辨；要原画质细节则用截图。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Ios.Orange,
-                )
-            }
-            if (exporting) {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    LinearProgressIndicator(
-                        progress = { progress },
-                        modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(Ios.RPill)),
-                        trackColor = Ios.Fill,
-                        color = Ios.Blue,
-                        gapSize = 0.dp,
-                        drawStopIndicator = {},
-                    )
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            buildProgressLabel(stage, progress, speed, selDurMs),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Ios.SecondaryLabel,
-                            modifier = Modifier.weight(1f),
+                IosGroup {
+                    PickerCell("分辨率", RES_LABELS, resSel, enabled = !fastCopy && !exporting) { resSel = it }
+                    IosSeparator()
+                    PickerCell("帧率", FPS_LABELS, fpsSel, enabled = !fastCopy && !exporting) { fpsSel = it }
+                    IosSeparator()
+                    PickerCell("画质", listOf("高", "中", "低"), quality.ordinal, enabled = !fastCopy && !exporting) { quality = Quality.entries[it] }
+                }
+                IosAction(if (advanced) "高级设置 ▴" else "高级设置 ▾", fontSize = 15.sp, enabled = !exporting) { advanced = !advanced }
+                if (advanced) {
+                    IosGroup {
+                        SwitchCell(
+                            title = "硬件解码", detail = if (hwDecoderAvailable) "加快高分辨率视频处理，失败时自动切换" else "当前设备不可用",
+                            checked = hwDecode && hwDecoderAvailable && !fastCopy,
+                            enabled = hwDecoderAvailable && !fastCopy && !exporting, onCheckedChange = { hwDecode = it },
                         )
-                        IosAction("取消", fontSize = 15.sp, color = Ios.Red) {
-                            job?.cancel()
-                            ExportEngine.cancelAll()
-                        }
+                        IosSeparator()
+                        SwitchCell(
+                            title = "硬件编码", detail = if (hwEncoderAvailable) "加快导出速度，失败时自动切换" else "当前设备不可用",
+                            checked = useHw && hwEncoderAvailable && !fastCopy,
+                            enabled = hwEncoderAvailable && !fastCopy && !exporting, onCheckedChange = { useHw = it },
+                        )
+                        IosSeparator()
+                        SwitchCell(
+                            title = "HEVC 编码", detail = "更省体积，部分播放器可能不支持",
+                            checked = hevc && useHw && hw.getOrElse(1) { false } && !fastCopy,
+                            enabled = useHw && hw.getOrElse(1) { false } && !fastCopy && !exporting, onCheckedChange = { hevc = it },
+                        )
                     }
                 }
-            } else {
-                Spacer(Modifier.height(2.dp))
-                IosFilledButton("开始导出") {
-                    exporting = true
-                    progress = 0f
-                    speed = 0.0
-                    stage = ""
-                    error = null
-                    job = scope.launch {
-                        try {
-                            ExportEngine.export(
-                                context,
-                                app.clips,
-                                app.inMs,
-                                app.outMs,
-                                ExportOptions(
-                                    targetHeight = RES_OPTIONS[resSel],
-                                    targetFps = FPS_OPTIONS[fpsSel],
-                                    quality = quality,
-                                    useHw = useHw,
-                                    hevc = hevc,
-                                    fastCopy = fastCopy,
-                                    hwDecode = hwDecode,
-                                ),
-                                hw,
-                            ) { st ->
-                                progress = st.progress
-                                speed = st.speed
-                                stage = st.stage
-                            }
-                                .onSuccess { result = it }
-                                .onFailure { error = it.message ?: "导出失败" }
-                        } finally {
-                            exporting = false
-                        }
-                    }
+                if (!fastCopy && resSel == 0 && srcHeight >= 2000) {
+                    Text("原始分辨率 ${srcHeight}p 导出耗时较长；可选择 1080p 加快处理，导出后检查关键细节是否清晰。",
+                        style = MaterialTheme.typography.bodySmall, color = Ios.SecondaryLabel)
                 }
+                error?.let { Text(it, color = Ios.Red, style = MaterialTheme.typography.bodySmall) }
             }
+            IosBar {
+                Column(Modifier.padding(horizontal = Ios.Gutter, vertical = 12.dp)) {
+                    if (exporting) {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            LinearProgressIndicator(
+                                progress = { progress },
+                                modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(Ios.RPill)),
+                                trackColor = Ios.Fill,
+                                color = Ios.Blue,
+                                gapSize = 0.dp,
+                                drawStopIndicator = {},
+                            )
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    buildProgressLabel(stage, progress, speed, selDurMs),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Ios.SecondaryLabel,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                IosAction("取消", fontSize = 15.sp, color = Ios.Red) {
+                                    job?.cancel()
+                                    ExportEngine.cancelAll()
+                                }
+                            }
+                        }
+                    } else {
+                        Spacer(Modifier.height(2.dp))
+                        IosFilledButton("导出 ${Tc.formatShort(selDurMs)} 视频") {
+                            exporting = true
+                            progress = 0f
+                            speed = 0.0
+                            stage = ""
+                            error = null
+                            val options = ExportOptions(
+                                targetHeight = RES_OPTIONS[resSel], targetFps = FPS_OPTIONS[fpsSel], quality = quality,
+                                useHw = useHw && hwEncoderAvailable, hevc = hevc && useHw && hw.getOrElse(1) { false },
+                                fastCopy = fastCopy, hwDecode = hwDecode && hwDecoderAvailable,
+                            )
+                            job = scope.launch {
+                                try {
+                                    ExportEngine.export(
+                                        context,
+                                        app.clips,
+                                        app.inMs,
+                                        app.outMs,
+                                        options,
+                                        hw,
+                                    ) { st ->
+                                        progress = st.progress
+                                        speed = st.speed
+                                        stage = st.stage
+                                    }
+                                        .onSuccess { result = it }
+                                        .onFailure { error = it.message ?: "导出失败" }
+                                } finally {
+                                    exporting = false
+                                }
+                            }
+                        }
+                    }
 
-            error?.let {
-                Text(it, color = Ios.Red, style = MaterialTheme.typography.bodySmall)
+                }
             }
         }
     }

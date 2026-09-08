@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -38,6 +39,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -70,6 +73,9 @@ fun TimelineBar(
     onOutChange: (Long) -> Unit,
     rangeEditable: Boolean = false,
     modifier: Modifier = Modifier,
+    compact: Boolean = false,
+    onPrecisionScrub: (Long) -> Unit = onScrubEnd,
+    onPrecisionChange: (Boolean) -> Unit = {},
 ) {
     if (totalMs <= 0) return
     var viewWpx by remember { mutableFloatStateOf(0f) }
@@ -77,6 +83,7 @@ fun TimelineBar(
     var dragMode by remember { mutableStateOf(DragMode.None) }
     var lastDragMs by remember { mutableLongStateOf(0L) }
     val density = LocalDensity.current
+    val haptics = LocalHapticFeedback.current
 
     // 手势 lambda 只组合一次，参数必须经 rememberUpdatedState 才能读到最新值
     val canEditRange by rememberUpdatedState(rangeEditable)
@@ -89,14 +96,17 @@ fun TimelineBar(
     val currentInChange by rememberUpdatedState(onInChange)
     val currentOutChange by rememberUpdatedState(onOutChange)
     val currentFpsAt by rememberUpdatedState(fpsAt)
+    val currentPrecisionScrub by rememberUpdatedState(onPrecisionScrub)
+    val currentPrecisionChange by rememberUpdatedState(onPrecisionChange)
+    DisposableEffect(Unit) { onDispose { currentPrecisionChange(false) } }
 
     // 左右内缩：手柄不贴屏幕边缘，避免拖入点时触发系统返回手势
     val insetPx = with(density) { 16.dp.toPx() }
     val usableWpx = (viewWpx - insetPx * 2).coerceAtLeast(1f)
     val contentWpx = usableWpx * timelineScale
     val pxPerMs = if (totalMs > 0) contentWpx / totalMs else 0f
-    val stripH = 48.dp
-    val barH = 72.dp
+    val stripH = if (compact) 24.dp else 48.dp
+    val barH = if (compact) 44.dp else 72.dp
 
     fun xOf(ms: Long): Float = insetPx + ms * pxPerMs
     fun msOf(x: Float): Long = ((x - insetPx) / pxPerMs).toLong().coerceIn(0, totalMs)
@@ -139,6 +149,10 @@ fun TimelineBar(
                 }
             }
             .pointerInput(Unit) {
+                var precise = false
+                var baseX = 0f
+                var baseY = 0f
+                var baseMs = 0L
                 val perMs = { (viewWpx - insetPx * 2).coerceAtLeast(1f) * curScale / curTotal }
                 fun xOfNow(ms: Long): Float = insetPx + ms * perMs()
                 fun msOfNow(x: Float): Long = ((x - insetPx) / perMs()).toLong().coerceIn(0, curTotal)
@@ -153,6 +167,10 @@ fun TimelineBar(
                 }
                 detectDragGestures(
                     onDragStart = { offset ->
+                        precise = false
+                        baseX = offset.x
+                        baseY = offset.y
+                        currentPrecisionChange(false)
                         val x = offset.x + scrollPx
                         val dIn = abs(x - xOfNow(curIn))
                         val dOut = abs(x - xOfNow(curOut))
@@ -174,15 +192,26 @@ fun TimelineBar(
                     onDragEnd = {
                         if (dragMode != DragMode.None) currentScrubEnd(lastDragMs)
                         dragMode = DragMode.None
+                        currentPrecisionChange(false)
                     },
                     onDragCancel = {
                         if (dragMode != DragMode.None) currentScrubEnd(lastDragMs)
                         dragMode = DragMode.None
+                        currentPrecisionChange(false)
                     },
                 ) { change, _ ->
                     change.consume()
                     val x = change.position.x + scrollPx
-                    val ms = msOfNow(x)
+                    if (dragMode == DragMode.Scrub && !precise && baseY - change.position.y >= 30.dp.toPx()) {
+                        precise = true
+                        baseX = change.position.x
+                        baseMs = lastDragMs
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        currentPrecisionChange(true)
+                    }
+                    val ms = if (dragMode == DragMode.Scrub && precise) {
+                        (baseMs + ((change.position.x - baseX) / perMs() * 0.12f).toLong()).coerceIn(0, curTotal)
+                    } else msOfNow(x)
                     lastDragMs = ms
                     val fps = currentFpsAt(ms).takeIf { it > 1.0 } ?: 30.0
                     val frameMs = (1000.0 / fps).toLong().coerceAtLeast(1L)
@@ -204,8 +233,8 @@ fun TimelineBar(
                             followTo(x)
                         }
                         DragMode.Scrub -> {
-                            currentScrub(ms)
-                            followTo(x)
+                            if (precise) currentPrecisionScrub(ms) else currentScrub(ms)
+                            followTo(xOfNow(ms))
                         }
                         DragMode.None -> Unit
                     }
