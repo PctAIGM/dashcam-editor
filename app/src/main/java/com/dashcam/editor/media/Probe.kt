@@ -84,7 +84,7 @@ object MediaLibrary {
         val retriever = MediaMetadataRetriever()
         try {
             retriever.setDataSource(path)
-            return buildInfo(retriever, displayName, readVideoTrack { it.setDataSource(path) })
+            return buildInfo(retriever, path, displayName, readVideoTrack { it.setDataSource(path) })
         } catch (_: Exception) {
             return null
         } finally {
@@ -97,7 +97,7 @@ object MediaLibrary {
         val retriever = MediaMetadataRetriever()
         try {
             retriever.setDataSource(context, uri)
-            return buildInfo(retriever, displayName, readVideoTrack { it.setDataSource(context, uri, null) })
+            return buildInfo(retriever, "", displayName, readVideoTrack { it.setDataSource(context, uri, null) })
         } catch (_: Exception) {
             return null
         } finally {
@@ -107,6 +107,7 @@ object MediaLibrary {
 
     private fun buildInfo(
         retriever: MediaMetadataRetriever,
+        filePath: String,
         displayName: String,
         track: Pair<Double, String>,
     ): ClipInfo? {
@@ -120,7 +121,7 @@ object MediaLibrary {
         val effFps = if (track.first in 1.0..240.0) track.first else 30.0
         val swap = rotation == 90 || rotation == 270
         return ClipInfo(
-            filePath = "",
+            filePath = filePath,
             displayName = displayName,
             durationMs = durationMs,
             displayWidth = if (swap) height else width,
