@@ -8,10 +8,13 @@ import android.os.Build
 import android.provider.MediaStore
 import android.util.Size
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,6 +24,9 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
@@ -29,6 +35,14 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.MoreHoriz
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -48,11 +62,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -60,6 +76,7 @@ import androidx.core.content.ContextCompat
 import com.dashcam.editor.media.MediaLibrary
 import com.dashcam.editor.util.Tc
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
@@ -85,6 +102,81 @@ fun LibraryScreen(app: AppModel, shareUris: androidx.compose.runtime.MutableStat
     var importLabel by remember { mutableStateOf("") }
     var videos by remember { mutableStateOf<List<LibVideo>>(emptyList()) }
     var infoVideo by remember { mutableStateOf<LibVideo?>(null) }
+    var selecting by remember { mutableStateOf(false) }
+    var selected by remember { mutableStateOf<Set<android.net.Uri>>(emptySet()) }
+    var batchBusy by remember { mutableStateOf(false) }
+    var showBatchConfirm by remember { mutableStateOf(false) }
+    var consentResult by remember { mutableStateOf<CompletableDeferred<Boolean>?>(null) }
+    val batchConsent = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
+        consentResult?.complete(result.resultCode == android.app.Activity.RESULT_OK)
+        consentResult = null
+    }
+    BackHandler(selecting || batchBusy) {
+        if (!batchBusy) { selecting = false; selected = emptySet() }
+    }
+
+    fun deleteSelected() {
+        if (batchBusy || selected.isEmpty()) return
+        val targets = selected.toList()
+        batchBusy = true
+        showBatchConfirm = false
+        scope.launch {
+            val removed = mutableSetOf<android.net.Uri>()
+            var cancelled = false
+            var failure: String? = null
+            suspend fun confirm(sender: android.content.IntentSender): Boolean {
+                val deferred = CompletableDeferred<Boolean>()
+                consentResult = deferred
+                batchConsent.launch(androidx.activity.result.IntentSenderRequest.Builder(sender).build())
+                return deferred.await()
+            }
+            try {
+                if (Build.VERSION.SDK_INT >= 30) {
+                    // 系统批量删除，一次确认一组；分组避免超出平台 URI 数量限制。
+                    for (group in targets.chunked(200)) {
+                        val sender = withContext(Dispatchers.IO) {
+                            MediaStore.createDeleteRequest(context.contentResolver, group).intentSender
+                        }
+                        if (!confirm(sender)) { cancelled = true; break }
+                        for (uri in group) {
+                            val result = withContext(Dispatchers.IO) { completeVideoDeletion(context, uri, false) }
+                            if (result is VideoDeleteResult.Ok) removed += uri
+                            else failure = (result as VideoDeleteResult.Error).message
+                        }
+                    }
+                } else {
+                    // Android 10 及以下按项删除；遇到授权只等待当前项，不并发弹窗。
+                    for (uri in targets) {
+                        var result = withContext(Dispatchers.IO) { deleteVideo(context, uri) }
+                        if (result is VideoDeleteResult.Confirm) {
+                            val request = result
+                            if (!confirm(request.sender)) { cancelled = true; break }
+                            result = withContext(Dispatchers.IO) {
+                                completeVideoDeletion(context, uri, request.retryAfterConsent)
+                            }
+                        }
+                        if (result is VideoDeleteResult.Ok) removed += uri
+                        else failure = (result as VideoDeleteResult.Error).message
+                    }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                failure = "删除失败：${e.message}"
+            } finally {
+                consentResult = null
+                selected = selected - removed
+                videos = videos.filterNot { it.uri in removed }
+                batchBusy = false
+            }
+            val remaining = targets.size - removed.size
+            snackbar.showSnackbar(when {
+                remaining == 0 -> "已删除 ${removed.size} 个视频"
+                cancelled -> "已取消，已删除 ${removed.size} 个，剩余 $remaining 个保留选择"
+                else -> "已删除 ${removed.size} 个，$remaining 个未完成。${failure.orEmpty()}"
+            })
+        }
+    }
 
     fun neededPermission(): String = when {
         Build.VERSION.SDK_INT >= 33 -> Manifest.permission.READ_MEDIA_VIDEO
@@ -136,13 +228,18 @@ fun LibraryScreen(app: AppModel, shareUris: androidx.compose.runtime.MutableStat
 
     // 删除：可直接删的立即删；系统文件弹出系统确认框，确认后整表刷新
     var deleteTarget by remember { mutableStateOf<android.net.Uri?>(null) }
+    var retryDeleteAfterConsent by remember { mutableStateOf(false) }
     val deleteConfirm = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { res ->
         val target = deleteTarget
+        val retry = retryDeleteAfterConsent
         deleteTarget = null
         if (res.resultCode == android.app.Activity.RESULT_OK && target != null) {
             scope.launch {
+                val result = withContext(Dispatchers.IO) { completeVideoDeletion(context, target, retry) }
+                if (result is VideoDeleteResult.Ok) selected = selected - target
                 videos = loadVideos(context)
-                snackbar.showSnackbar("已删除")
+                snackbar.showSnackbar(if (result is VideoDeleteResult.Ok) "已删除" else
+                    (result as VideoDeleteResult.Error).message)
             }
         }
     }
@@ -152,11 +249,13 @@ fun LibraryScreen(app: AppModel, shareUris: androidx.compose.runtime.MutableStat
             when (val r = withContext(Dispatchers.IO) { deleteVideo(context, video.uri) }) {
                 is VideoDeleteResult.Ok -> {
                     videos = videos.filterNot { it.uri == video.uri }
+                    selected = selected - video.uri
                     infoVideo = null
                     snackbar.showSnackbar("已删除")
                 }
                 is VideoDeleteResult.Confirm -> {
                     deleteTarget = video.uri
+                    retryDeleteAfterConsent = r.retryAfterConsent
                     infoVideo = null
                     deleteConfirm.launch(androidx.activity.result.IntentSenderRequest.Builder(r.sender).build())
                 }
@@ -177,13 +276,25 @@ fun LibraryScreen(app: AppModel, shareUris: androidx.compose.runtime.MutableStat
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .padding(start = Ios.Gutter, end = 8.dp, top = 4.dp, bottom = 6.dp),
+                    .padding(horizontal = Ios.Gutter, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("视频", style = MaterialTheme.typography.displaySmall)
-                Spacer(Modifier.weight(1f))
-                IconButton(onClick = { filePicker.launch(arrayOf("video/*")) }) {
-                    Icon(Icons.Filled.FolderOpen, "从文件选择（可多选拼接）", tint = Ios.Blue)
+                Column(Modifier.weight(1f)) {
+                    Text(if (selecting) "已选 ${selected.size} 项" else "视频",
+                        fontSize = 26.sp, lineHeight = 32.sp, fontWeight = FontWeight.SemiBold)
+                    Text(if (selecting) "轻点视频以选择" else "${videos.size} 个视频 · 长按选择",
+                        fontSize = 12.sp, lineHeight = 18.sp, color = Ios.SecondaryLabel)
+                }
+                IosAction(if (selecting) "完成" else "选择", fontSize = 14.sp,
+                    color = if (selecting) Ios.Blue else Ios.Label,
+                    modifier = Modifier.widthIn(min = 64.dp).clip(RoundedCornerShape(Ios.RPill)).background(if (selecting) Ios.AccentFill else Ios.Fill),
+                    enabled = granted && !importing && !batchBusy) {
+                    selecting = !selecting
+                    selected = emptySet()
+                }
+                if (!selecting) IconButton(modifier = Modifier.padding(start = 6.dp),
+                    enabled = !batchBusy && !importing, onClick = { filePicker.launch(arrayOf("video/*")) }) {
+                    Icon(Icons.Filled.FolderOpen, "从文件选择（可多选拼接）", tint = Ios.SecondaryLabel, modifier = Modifier.size(22.dp))
                 }
             }
 
@@ -228,30 +339,103 @@ fun LibraryScreen(app: AppModel, shareUris: androidx.compose.runtime.MutableStat
                 } else {
                     val groups = remember(videos) { groupByDay(videos) }
                     LazyVerticalGrid(
-                        columns = GridCells.Adaptive(112.dp),
+                        columns = GridCells.Adaptive(104.dp),
                         modifier = Modifier.weight(1f),
-                        horizontalArrangement = Arrangement.spacedBy(2.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        contentPadding = PaddingValues(start = Ios.Gutter, end = Ios.Gutter, bottom = 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
                         groups.forEach { (dayLabel, dayVideos) ->
                             item(key = "h_$dayLabel", span = { GridItemSpan(maxLineSpan) }) {
                                 Text(
                                     dayLabel,
-                                    style = MaterialTheme.typography.titleMedium,
+                                    fontSize = 14.sp, fontWeight = FontWeight.Medium, color = Ios.SecondaryLabel,
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .background(Ios.Background)
-                                        .padding(start = Ios.Gutter, end = Ios.Gutter, top = 12.dp, bottom = 6.dp),
+                                        .padding(top = 8.dp, bottom = 2.dp),
                                 )
                             }
                             items(dayVideos, key = { it.uri.toString() }) { v ->
+                                var menuOpen by remember(v.uri) { mutableStateOf(false) }
                                 Column {
-                                    VideoCell(video = v, onClick = { openEditor(listOf(v.uri)) }, onLongClick = { infoVideo = v })
-                                    Text(v.displayName, modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
-                                        style = MaterialTheme.typography.bodySmall, color = Ios.SecondaryLabel,
+                                    Box(Modifier.clip(RoundedCornerShape(Ios.RControl))) {
+                                        VideoCell(video = v, onClick = {
+                                            if (!batchBusy) {
+                                                if (selecting) selected = if (v.uri in selected) selected - v.uri else selected + v.uri
+                                                else openEditor(listOf(v.uri))
+                                            }
+                                        }, onLongClick = {
+                                            if (!batchBusy && !importing) {
+                                                selecting = true
+                                                selected = selected + v.uri
+                                            }
+                                        })
+                                        Box(Modifier.fillMaxWidth().height(36.dp).background(
+                                            Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.26f), Color.Transparent))))
+                                        if (selecting) Box(
+                                            Modifier.align(Alignment.TopStart).padding(6.dp).size(22.dp)
+                                                .clip(RoundedCornerShape(Ios.RPill))
+                                                .background(if (v.uri in selected) Ios.Blue else Ios.SubtleScrim)
+                                                .border(if (v.uri in selected) 0.dp else 1.5.dp, Color.White, RoundedCornerShape(Ios.RPill)),
+                                            contentAlignment = Alignment.Center,
+                                        ) {
+                                            if (v.uri in selected) Icon(Icons.Filled.Check, "已选择",
+                                                tint = Color.White, modifier = Modifier.size(15.dp))
+                                        }
+                                        Box(Modifier.align(Alignment.TopEnd)) {
+                                            Box(Modifier.size(48.dp).clickable(
+                                                enabled = !batchBusy && !importing,
+                                                role = androidx.compose.ui.semantics.Role.Button,
+                                                onClick = { menuOpen = true },
+                                            )) {
+                                                Icon(Icons.Filled.MoreHoriz, "${v.displayName} 的更多操作",
+                                                    tint = Color.White, modifier = Modifier.align(Alignment.TopEnd)
+                                                        .padding(top = 2.dp, end = 2.dp).size(18.dp))
+                                            }
+                                            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false },
+                                                shape = RoundedCornerShape(Ios.RCard), containerColor = Ios.Background,
+                                                tonalElevation = 0.dp, shadowElevation = 4.dp,
+                                                modifier = Modifier.widthIn(min = 152.dp)) {
+                                                DropdownMenuItem(text = {
+                                                    Text("视频信息", fontSize = 14.sp, lineHeight = 20.sp,
+                                                        letterSpacing = 0.sp, fontWeight = FontWeight.Normal, color = Ios.Label)
+                                                }, leadingIcon = {
+                                                    Icon(Icons.Outlined.Info, null, tint = Ios.SecondaryLabel, modifier = Modifier.size(18.dp))
+                                                }, modifier = Modifier.height(44.dp), contentPadding = PaddingValues(horizontal = 14.dp),
+                                                    enabled = !batchBusy && !importing, onClick = {
+                                                    menuOpen = false
+                                                    infoVideo = v
+                                                })
+                                            }
+                                        }
+                                    }
+                                    Text(v.displayName, modifier = Modifier.padding(horizontal = 2.dp, vertical = 6.dp),
+                                        fontSize = 12.sp, lineHeight = 17.sp, fontWeight = FontWeight.Normal, color = Ios.SecondaryLabel,
                                         minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
                                 }
                             }
+                        }
+                    }
+                }
+            }
+            if (selecting) {
+                IosBar {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = Ios.Gutter, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        IosAction(if (videos.isNotEmpty() && selected.size == videos.size) "取消全选" else "全选",
+                            fontSize = 14.sp, color = Ios.Label, enabled = !batchBusy) {
+                            selected = if (selected.size == videos.size) emptySet() else videos.map { it.uri }.toSet()
+                        }
+                        Spacer(Modifier.weight(1f))
+                        Row(Modifier.clip(RoundedCornerShape(Ios.RPill)).background(Ios.Red.copy(alpha = 0.08f))
+                            .clickable(enabled = selected.isNotEmpty() && !batchBusy) { showBatchConfirm = true }
+                            .padding(horizontal = 18.dp).height(44.dp),
+                            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            val deleteColor = if (selected.isNotEmpty() && !batchBusy) Ios.Red else Ios.TertiaryLabel
+                            Icon(Icons.Outlined.Delete, null, tint = deleteColor, modifier = Modifier.size(18.dp))
+                            Text(if (batchBusy) "删除中…" else "删除 (${selected.size})", fontSize = 14.sp,
+                                fontWeight = FontWeight.Medium, color = deleteColor)
                         }
                     }
                 }
@@ -262,6 +446,13 @@ fun LibraryScreen(app: AppModel, shareUris: androidx.compose.runtime.MutableStat
     infoVideo?.let { v ->
         VideoInfoSheet(video = v, onDismiss = { infoVideo = null }, onDelete = { requestDelete(v) })
     }
+    if (showBatchConfirm) AlertDialog(
+        onDismissRequest = { showBatchConfirm = false },
+        title = { Text("删除 ${selected.size} 个视频？") },
+        text = { Text("将从设备中删除所选视频，无法撤销。") },
+        confirmButton = { TextButton(onClick = { deleteSelected() }) { Text("删除", color = Ios.Red) } },
+        dismissButton = { TextButton(onClick = { showBatchConfirm = false }) { Text("取消") } },
+    )
 }
 
 /** 按天分组（新→旧），标签：今天 / 昨天 / M月d日 / yyyy年M月d日 */
@@ -415,7 +606,7 @@ internal suspend fun loadThumbnail(context: Context, uri: android.net.Uri): Imag
 /** 删除 MediaStore 视频的结果：直接成功 / 需要系统确认框 / 失败 */
 internal sealed interface VideoDeleteResult {
     data class Ok(val count: Int) : VideoDeleteResult
-    data class Confirm(val sender: android.content.IntentSender) : VideoDeleteResult
+    data class Confirm(val sender: android.content.IntentSender, val retryAfterConsent: Boolean) : VideoDeleteResult
     data class Error(val message: String) : VideoDeleteResult
 }
 
@@ -426,13 +617,15 @@ internal sealed interface VideoDeleteResult {
 internal fun deleteVideo(context: Context, uri: android.net.Uri): VideoDeleteResult {
     return try {
         val n = context.contentResolver.delete(uri, null, null)
-        if (n > 0) VideoDeleteResult.Ok(n) else VideoDeleteResult.Error("未找到该视频，可能已被删除")
+        if (n > 0) verifyVideoDeleted(context, uri) else VideoDeleteResult.Error("未找到该视频，可能已被删除")
     } catch (e: android.app.RecoverableSecurityException) {
-        VideoDeleteResult.Confirm(e.userAction.actionIntent.intentSender)
+        // 此弹窗只授权，RESULT_OK 后仍须再次调用 delete。
+        VideoDeleteResult.Confirm(e.userAction.actionIntent.intentSender, retryAfterConsent = true)
     } catch (_: SecurityException) {
         if (Build.VERSION.SDK_INT >= 30) {
             runCatching {
-                VideoDeleteResult.Confirm(MediaStore.createDeleteRequest(context.contentResolver, listOf(uri)).intentSender)
+                VideoDeleteResult.Confirm(MediaStore.createDeleteRequest(context.contentResolver, listOf(uri)).intentSender,
+                    retryAfterConsent = false)
             }.getOrElse { VideoDeleteResult.Error("无法删除：${it.message}") }
         } else {
             VideoDeleteResult.Error("没有删除该视频的权限")
@@ -440,4 +633,25 @@ internal fun deleteVideo(context: Context, uri: android.net.Uri): VideoDeleteRes
     } catch (e: Exception) {
         VideoDeleteResult.Error("删除失败：${e.message}")
     }
+}
+
+/** 授权弹窗需要补做删除；createDeleteRequest 已由系统删除，只检查结果。 */
+internal fun completeVideoDeletion(context: Context, uri: android.net.Uri, retryAfterConsent: Boolean): VideoDeleteResult {
+    if (!retryAfterConsent) return verifyVideoDeleted(context, uri)
+    return when (val result = deleteVideo(context, uri)) {
+        is VideoDeleteResult.Confirm -> VideoDeleteResult.Error("删除未完成：系统仍未授予删除权限，请重试")
+        else -> result
+    }
+}
+
+private fun verifyVideoDeleted(context: Context, uri: android.net.Uri): VideoDeleteResult = try {
+    val cursor = context.contentResolver.query(uri, arrayOf(MediaStore.MediaColumns._ID), null, null, null)
+    if (cursor == null) {
+        VideoDeleteResult.Error("无法确认删除结果，请刷新后重试")
+    } else cursor.use {
+        if (it.moveToFirst()) VideoDeleteResult.Error("删除未完成，视频仍在媒体库中")
+        else VideoDeleteResult.Ok(1)
+    }
+} catch (e: Exception) {
+    VideoDeleteResult.Error("无法确认删除结果：${e.message}")
 }

@@ -301,6 +301,7 @@ fun EditorScreen(app: AppModel, onBack: () -> Unit) {
         BoxWithConstraints((if (fullScreen) Modifier.safeDrawingPadding() else Modifier.padding(pad)).fillMaxSize()) {
             // 横屏利用宽度并排放置时间轴和播放操作；窄窗口或大字体时保留分行布局。
             val compactControls = maxWidth > maxHeight && maxWidth >= 600.dp && LocalDensity.current.fontScale <= 1.3f
+            val portraitTools = maxHeight >= maxWidth && !fullScreen
             val playbackControls: @Composable (Modifier) -> Unit = { modifier ->
                 PlaybackControls(
                     modifier = modifier,
@@ -348,7 +349,7 @@ fun EditorScreen(app: AppModel, onBack: () -> Unit) {
                 // 找帧时视频是主区域，所有裁剪标记都留在时间轴上，不会被误拖动。
                 Box(Modifier.weight(1f).fillMaxWidth().background(Ios.Stage)) {
                     PlayerArea(Modifier.fillMaxSize(), controller, zoomState, posMs, fpsAt(posMs), { togglePlay() }, videoAspect)
-                    Row(
+                    if (!portraitTools) Row(
                         Modifier
                             .align(Alignment.TopEnd)
                             .padding(8.dp)
@@ -384,17 +385,40 @@ fun EditorScreen(app: AppModel, onBack: () -> Unit) {
                                 .clip(RoundedCornerShape(Ios.RCard)).background(Ios.Background).padding(6.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            ShotThumb(shot, Modifier.size(56.dp)) {
+                            ShotThumb(shot, Modifier.size(56.dp), showTimeLabel = false) {
                                 val index = app.shots.indexOf(shot)
                                 if (index >= 0) { pauseForPanel(); viewerIndex = index }
                                 recentShot = null
                             }
                             Column {
                                 Text("已保存", fontSize = 11.sp, color = Ios.SecondaryLabel, modifier = Modifier.padding(horizontal = 8.dp))
+                                Text(shot.timeLabel, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+                                    color = Ios.Label, maxLines = 1, modifier = Modifier.padding(horizontal = 8.dp))
                                 IosAction("分享", fontSize = 13.sp) { shareUri(context, shot.uri, "image/jpeg") }
                             }
                             IconButton(onClick = { recentShot = null }, modifier = Modifier.size(44.dp)) {
                                 Icon(Icons.Filled.Close, "收起截图预览", tint = Ios.SecondaryLabel, modifier = Modifier.size(18.dp))
+                            }
+                        }
+                    }
+                }
+
+                if (portraitTools) {
+                    IosBar {
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceEvenly,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            IosAction("缩小", enabled = zoomState.scale > 1f, fontSize = 15.sp) {
+                                zoomState.zoomBy(1f / 1.5f)
+                            }
+                            IosAction("%.1f×".format(zoomState.scale), fontSize = 15.sp) { zoomState.reset() }
+                            IosAction("放大", enabled = zoomState.scale < zoomState.maxScale, fontSize = 15.sp) {
+                                zoomState.zoomBy(1.5f)
+                            }
+                            IosAction(if (shotBusy) "保存中" else "截图", enabled = !shotBusy, strong = true, fontSize = 15.sp) {
+                                takeShot()
                             }
                         }
                     }

@@ -84,7 +84,7 @@ fun shareUri(context: Context, uri: Uri, mime: String) {
 }
 
 @Composable
-fun ShotThumb(shot: ShotItem, modifier: Modifier = Modifier, onClick: () -> Unit) {
+fun ShotThumb(shot: ShotItem, modifier: Modifier = Modifier, showTimeLabel: Boolean = true, onClick: () -> Unit) {
     Box(
         modifier
             .clip(RoundedCornerShape(Ios.RControl))
@@ -99,8 +99,9 @@ fun ShotThumb(shot: ShotItem, modifier: Modifier = Modifier, onClick: () -> Unit
                 modifier = Modifier.fillMaxSize(),
             )
         }
-        Text(
+        if (showTimeLabel) Text(
             shot.timeLabel,
+            maxLines = 1,
             color = Color.White,
             fontSize = 9.sp,
             fontFamily = FontFamily.Monospace,

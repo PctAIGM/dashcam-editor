@@ -60,6 +60,7 @@ fun InsertVideoPicker(
     var menuOpen by remember { mutableStateOf(false) }
     var infoVideo by remember { mutableStateOf<LibVideo?>(null) }
     var deleteTarget by remember { mutableStateOf<Uri?>(null) }
+    var retryDeleteAfterConsent by remember { mutableStateOf(false) }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         granted = hasVideoPermission(context)
     }
@@ -81,12 +82,18 @@ fun InsertVideoPicker(
     }
     val deleteConfirm = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { res ->
         val target = deleteTarget
+        val retry = retryDeleteAfterConsent
         deleteTarget = null
         if (res.resultCode == android.app.Activity.RESULT_OK && target != null) {
-            selected = selected - target
             scope.launch {
+                val result = withContext(Dispatchers.IO) { completeVideoDeletion(context, target, retry) }
+                if (result is VideoDeleteResult.Ok) {
+                    selected = selected - target
+                    fileVideos = fileVideos.filterNot { it.uri == target }
+                }
                 videos = loadVideos(context)
-                Toast.makeText(context, "已删除", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, if (result is VideoDeleteResult.Ok) "已删除" else
+                    (result as VideoDeleteResult.Error).message, Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -96,11 +103,14 @@ fun InsertVideoPicker(
             when (val r = withContext(Dispatchers.IO) { deleteVideo(context, video.uri) }) {
                 is VideoDeleteResult.Ok -> {
                     videos = videos.filterNot { it.uri == video.uri }
+                    fileVideos = fileVideos.filterNot { it.uri == video.uri }
                     selected = selected - video.uri
                     infoVideo = null
+                    Toast.makeText(context, "已删除", Toast.LENGTH_SHORT).show()
                 }
                 is VideoDeleteResult.Confirm -> {
                     deleteTarget = video.uri
+                    retryDeleteAfterConsent = r.retryAfterConsent
                     infoVideo = null
                     deleteConfirm.launch(androidx.activity.result.IntentSenderRequest.Builder(r.sender).build())
                 }
