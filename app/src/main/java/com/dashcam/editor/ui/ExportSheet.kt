@@ -47,6 +47,7 @@ import com.dashcam.editor.export.Quality
 import com.dashcam.editor.media.PlayerController
 import com.dashcam.editor.util.Tc
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -209,6 +210,10 @@ fun ExportSheet(
                                     }
                                         .onSuccess { result = it }
                                         .onFailure { error = it.message ?: "导出失败" }
+                                } catch (e: CancellationException) {
+                                    throw e
+                                } catch (e: Exception) {
+                                    error = e.message ?: "导出失败"
                                 } finally {
                                     exporting = false
                                 }
@@ -252,7 +257,8 @@ private fun buildProgressLabel(stage: String, progress: Float, speed: Double, se
     parts += "${(progress * 100).roundToInt()}%"
     if (speed > 0.01) {
         parts += String.format(Locale.US, "%.2f× 实时", speed)
-        val remainSec = (1f - progress) * (selDurMs / 1000.0) / speed
+        val encodingFraction = (progress / ExportEngine.ENCODING_PROGRESS).coerceIn(0f, 1f)
+        val remainSec = (1f - encodingFraction) * (selDurMs / 1000.0) / speed
         if (remainSec.isFinite() && remainSec > 0) parts += "约剩 ${remainSec.roundToInt()}s"
     }
     return parts.joinToString(" · ")

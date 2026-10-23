@@ -8,12 +8,14 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import java.io.File
+import java.io.OutputStream
+import kotlinx.coroutines.CancellationException
 
 /** 导出视频存 Movies/dashcam-editor，截图存 Pictures/dashcam-editor（相册可见） */
 object MediaStoreSaver {
 
-    fun saveVideo(context: Context, src: File, displayName: String): Uri? =
-        save(context, src, displayName, "video/mp4", Environment.DIRECTORY_MOVIES, MediaStore.Video.Media.EXTERNAL_CONTENT_URI)
+    fun saveVideo(context: Context, src: File, displayName: String, onProgress: (Long, Long) -> Unit = { _, _ -> }): Uri? =
+        save(context, src, displayName, "video/mp4", Environment.DIRECTORY_MOVIES, MediaStore.Video.Media.EXTERNAL_CONTENT_URI, onProgress)
 
     fun saveImage(context: Context, src: File, displayName: String): Uri? =
         save(context, src, displayName, "image/jpeg", Environment.DIRECTORY_PICTURES, MediaStore.Images.Media.EXTERNAL_CONTENT_URI)
@@ -25,6 +27,7 @@ object MediaStoreSaver {
         mime: String,
         parentDir: String,
         collection: Uri,
+        onProgress: (Long, Long) -> Unit = { _, _ -> },
     ): Uri? {
         return if (Build.VERSION.SDK_INT >= 29) {
             val resolver = context.contentResolver
@@ -37,14 +40,15 @@ object MediaStoreSaver {
             val uri = resolver.insert(collection, values) ?: return null
             runCatching {
                 resolver.openOutputStream(uri)?.use { out ->
-                    src.inputStream().use { it.copyTo(out) }
+                    copy(src, out, onProgress)
                 } ?: throw IllegalStateException("无法写入")
                 values.clear()
                 values.put(MediaStore.MediaColumns.IS_PENDING, 0)
-                resolver.update(uri, values, null, null)
+                check(resolver.update(uri, values, null, null) > 0) { "无法发布到相册" }
                 uri
             }.getOrElse {
                 runCatching { resolver.delete(uri, null, null) }
+                if (it is CancellationException) throw it
                 null
             }
         } else {
@@ -52,10 +56,30 @@ object MediaStoreSaver {
             if (!dir.exists()) dir.mkdirs()
             val dst = File(dir, displayName)
             runCatching {
-                src.copyTo(dst, overwrite = true)
+                dst.outputStream().use { copy(src, it, onProgress) }
                 MediaScannerConnection.scanFile(context, arrayOf(dst.absolutePath), arrayOf(mime), null)
                 Uri.fromFile(dst)
-            }.getOrNull()
+            }.getOrElse {
+                dst.delete()
+                if (it is CancellationException) throw it
+                null
+            }
+        }
+    }
+
+    private fun copy(src: File, out: OutputStream, onProgress: (Long, Long) -> Unit) {
+        val total = src.length()
+        var copied = 0L
+        onProgress(copied, total)
+        src.inputStream().use { input ->
+            val buffer = ByteArray(1024 * 1024)
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                out.write(buffer, 0, read)
+                copied += read
+                onProgress(copied, total)
+            }
         }
     }
 }

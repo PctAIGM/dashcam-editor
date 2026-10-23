@@ -8,6 +8,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -18,6 +20,7 @@ import com.dashcam.editor.ui.DashcamTheme
 import com.dashcam.editor.ui.EditorScreen
 import com.dashcam.editor.ui.LibraryScreen
 import com.dashcam.editor.ui.Screen
+import com.dashcam.editor.media.CacheMaintenance
 
 class MainActivity : ComponentActivity() {
 
@@ -26,6 +29,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        CacheMaintenance.onAppOpened(this)
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT),
@@ -59,6 +63,11 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun AppRoot(shareUris: androidx.compose.runtime.MutableState<List<Uri>>) {
     val app = remember { AppModel() }
+    DisposableEffect(app) { onDispose { app.releaseCache() } }
+    LaunchedEffect(app.screen) {
+        // The old editor/player has been disposed before clearing its imported copies' pins.
+        if (app.screen == Screen.Library) app.loadClips(emptyList())
+    }
     when (app.screen) {
         Screen.Library -> LibraryScreen(app, shareUris)
         Screen.Edit -> EditorScreen(app, onBack = { app.screen = Screen.Library })

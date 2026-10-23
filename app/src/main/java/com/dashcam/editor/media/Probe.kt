@@ -8,6 +8,9 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import java.io.File
 import java.util.UUID
 
@@ -50,8 +53,12 @@ object MediaLibrary {
                 if (info != null && info.durationMs > 0) {
                     result.add(info)
                 } else {
+                    copied.delete()
                     onError("无法读取视频信息：$name")
                 }
+            } catch (e: CancellationException) {
+                result.forEach { File(it.filePath).delete() }
+                throw e
             } catch (e: Exception) {
                 onError("导入失败 $name：${e.message}")
             }
@@ -69,14 +76,27 @@ object MediaLibrary {
         }
     }.getOrNull()
 
-    private fun copyToCache(context: Context, uri: Uri, displayName: String): File {
+    private suspend fun copyToCache(context: Context, uri: Uri, displayName: String): File {
         val dir = File(context.cacheDir, "imports").apply { mkdirs() }
         val ext = displayName.substringAfterLast('.', "mp4").take(5).ifBlank { "mp4" }
         val target = File(dir, "${UUID.randomUUID()}.$ext")
-        context.contentResolver.openInputStream(uri)?.use { input ->
-            target.outputStream().use { output -> input.copyTo(output, 1 shl 20) }
-        } ?: throw IllegalStateException("无法打开所选文件")
-        return target
+        try {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                target.outputStream().use { output ->
+                    val buffer = ByteArray(1 shl 20)
+                    while (true) {
+                        currentCoroutineContext().ensureActive()
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        output.write(buffer, 0, count)
+                    }
+                }
+            } ?: throw IllegalStateException("无法打开所选文件")
+            return target
+        } catch (e: Exception) {
+            target.delete()
+            throw e
+        }
     }
 
     /** 系统 API 探测时长/分辨率/旋转/音轨；帧率取自 MediaFormat（优先浮点精确值） */

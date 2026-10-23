@@ -25,6 +25,7 @@
 - `MainActivity.kt` — 入口：SAF / 分享导入、页面切换；configChanges 自持横竖屏状态
 - `ui/` — 界面与状态：`AppModel`（全局状态）、`LibraryScreen`（首页网格、多选插入）、`EditorScreen`（编辑器主界面）、`ExportSheet`（导出面板）、`ShotsGallery`（截图画廊）、`Theme.kt`（iOS 18 设计令牌与 `Ios*` 组件）
 - `media/` — `PlayerController`（ExoPlayer 封装、EXACT seek、逐帧步进）、`Probe`（片源探测）、`FfExec`（ffmpeg 异步执行）
+- `media/CacheStorage.kt` / `CacheMaintenance.kt` — 媒体缓存清理、使用中保护及 WorkManager 定期任务；`ui/CacheCleanupDialog.kt` 为首页手动入口
 - `export/` — `ExportEngine`（导出管线）、`MediaStoreSaver`（成品入相册）
 - `shot/` `zoom/` `timeline/` `util/` — 截图、缩放平移、时间轴、时间码
 - `com/arthenica/smartexception/java/Exceptions.java` — ffmpeg-kit 缺失依赖 stub，**勿删**
@@ -37,6 +38,8 @@
    - FFprobeKit 不可用，探测一律走 MediaMetadataRetriever + MediaExtractor；
    - ffmpeg 调用一律走 `FfExec`，不要用同步 `execute()`。
 3. **导出语义**：裁剪 seek 保持「输入侧预滚 2s + 输出侧精确丢帧」；改动导出管线时保持帧精确语义与多级编解码回退链。
+   - 大文件导出通过 `FfExec.encode` 异步执行；连续 120 秒无媒体时间、帧数或输出字节增长时取消，确认原会话退出后才回退，禁止对持续工作的长视频设置固定总超时。底层会话取消后仍未退出则报错并停止回退。
+   - 本地相册输出不启用 `+faststart`（避免结束时全文件重排）；进度覆盖编码、封装、校验与相册复制，只有入相册成功才显示 100%。保存时须响应取消并清理未完成记录。
 4. **UI 规范**：新增控件复用 `ui/Theme.kt` 的 `Ios*` 组件与令牌，不要写裸 `RoundedCornerShape(18.dp)` 之类。
 5. **依赖**：新库版本直接写入 `app/build.gradle.kts`（本项目未用 Version Catalog）。
 6. **范围**：只改与任务相关的代码；不顺手大重构、不改无关版本号。
@@ -45,6 +48,8 @@
 9. **操作效率**：竖屏/全屏均支持上移精细找帧（12% 灵敏度 + EXACT seek + 轻振），时间轴仍只找帧。入出读数可跳转，选区预览到出点停止，手动操作结束预览；重置支持撤销，重新打点/变更片段后失效。截图成功提供短暂预览与分享。拼接导入前支持排序（包括 SAF 文件），视频网格列数自适应。导出面板内容滚动、底部操作固定、高级选项折叠，参数用本机 SharedPreferences 持久化；导出中禁止修改或关闭面板。
 
 10. **视频删除**：首页长按视频进入多选并选中该项，也可点顶栏「选择」胶囊按钮，支持全选和批量删除；缩略图右上角小 ⋯ 菜单（距顶边、右边各 2dp，无底色，点击区域 48dp）提供「视频信息」（14sp 常规字重），多选标记位于左上角，多选时同样可用；批量删除期间禁用选择、导入与退出操作。Android 11+ 使用系统批量删除请求（每组最多 200 项），旧系统顺序处理删除及授权，取消后停止后续项。首页和拼接选择器共用删除结果处理。`RecoverableSecurityException` 的弹窗只授予权限，同意后须重试删除；`MediaStore.createDeleteRequest` 由系统执行删除。同意弹窗不等于删除成功，需查询确认媒体记录已移除后再提示成功、移除已选项；失败保留已选项。
+
+11. **缓存清理**：首页清扫图标显示缓存/可清理/使用中空间，可手动清理全部未使用的媒体缓存。只清理 `cache/imports/`、`cache/export_*/` 及缓存根目录旧版 `dashcam_*.mp4/txt`、`shot_*.jpg`，不得清空整个 cache、跟随符号链接或触碰相册/设置。自动任务每 24 小时及打开应用时检查，过期阈值为最后使用后 24 小时；用唯一 WorkManager 任务避免重复调度，系统可延后执行。会话按所有者保护片源，导入保护必须覆盖文件交接到 AppModel；编辑/导入/截图/导出以及原生 FFmpeg 会话有任一未结束时暂缓清理。取消协程不等于原生任务退出，不可提前释放其保护；文件大小和释放空间一律使用 Long。
 
 ## 强制验证（每次修改后必须执行）
 

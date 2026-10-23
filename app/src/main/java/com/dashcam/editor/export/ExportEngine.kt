@@ -3,20 +3,21 @@ package com.dashcam.editor.export
 import android.content.Context
 import android.net.Uri
 import com.arthenica.ffmpegkit.FFmpegKit
-import com.arthenica.ffmpegkit.FFmpegSessionCompleteCallback
 import com.arthenica.ffmpegkit.ReturnCode
-import com.arthenica.ffmpegkit.StatisticsCallback
 import com.dashcam.editor.media.ClipInfo
 import com.dashcam.editor.media.FfExec
+import com.dashcam.editor.media.CacheMaintenance
 import com.dashcam.editor.util.Tc
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import kotlin.coroutines.resume
+import java.util.UUID
 import kotlin.math.abs
 
 enum class Quality { HIGH, MEDIUM, LOW }
@@ -48,6 +49,8 @@ data class SelectionEntry(val clip: ClipInfo, val inMs: Long, val outMs: Long)
  * - 快速模式：输入侧 seek + 流复制，秒出，关键帧对齐
  */
 object ExportEngine {
+
+    const val ENCODING_PROGRESS = 0.9f
 
     /** 输入侧 seek 的预滚时长：够覆盖常见 1～2s GOP，又不会白解太多帧 */
     private const val PREROLL_MS = 2_000L
@@ -89,84 +92,108 @@ object ExportEngine {
         hw: BooleanArray,
         onProgress: (ExportStats) -> Unit,
     ): Result<ExportResult> = withContext(Dispatchers.IO) {
-        val entries = selectionEntries(clips, startMs, endMs)
-        if (entries.isEmpty()) {
-            return@withContext Result.failure(IllegalStateException("选中区间无效"))
-        }
-        val selDurMs = endMs - startMs
-        val srcH = entries.first().clip.displayHeight
-        val srcFps = entries.first().clip.fps
-        val anyAudio = entries.any { it.clip.hasAudio }
-
-        val scaleH = options.targetHeight
-            ?.let { minOf(it, srcH) }          // 不放大，只缩小
-            ?.let { if (it % 2 == 1) it - 1 else it }
-        val needScale = scaleH != null && scaleH < srcH
-        val needFps = options.targetFps != null && abs(options.targetFps!! - srcFps) > 0.05
-
-        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val outName = "dashcam_$stamp.mp4"
-        val outFile = File(context.cacheDir, outName)
-
-        var ok = false
-        var lastError = ""
-
-        // 校验输出实际时长（部分设备的 mediacodec 会"成功"地输出 0 帧，必须实测）
-        fun outputValid(): Boolean {
-            if (!outFile.exists() || outFile.length() < 1024) return false
-            val retriever = android.media.MediaMetadataRetriever()
-            return try {
-                retriever.setDataSource(outFile.absolutePath)
-                val dur = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-                dur >= selDurMs * 8 / 10
-            } catch (_: Exception) {
-                false
-            } finally {
-                runCatching { retriever.release() }
+        CacheMaintenance.storage.beginOperation().use {
+            val entries = selectionEntries(clips, startMs, endMs)
+            if (entries.isEmpty()) {
+                return@withContext Result.failure(IllegalStateException("选中区间无效"))
             }
-        }
+            val selDurMs = entries.sumOf { it.outMs - it.inMs }
+            val srcH = entries.first().clip.displayHeight
+            val srcFps = entries.first().clip.fps
+            val anyAudio = entries.any { it.clip.hasAudio }
 
-        if (options.fastCopy) {
-            val args = buildArgs(entries, scaleH, needScale, needFps, anyAudio, options, null, null, outFile)
-            ok = runFfmpeg(args, selDurMs, "流复制", onProgress) && outputValid()
-            if (!ok) lastError = "快速模式失败（可能不在关键帧上，请用精确模式）"
-        } else {
-            val encoder: String? = when {
-                !options.useHw -> null
-                options.hevc && hw.getOrElse(1) { false } -> "hevc_mediacodec"
-                !options.hevc && hw.getOrElse(0) { false } -> "h264_mediacodec"
-                else -> null
-            }
-            val decoder = hwDecoderOf(entries, options, hw)
-            // 从最快组合逐级回退，每级都用实际输出时长验证，避免个别设备静默输出 0 帧
-            val plan = ArrayList<Triple<String, String?, String?>>()
-            if (encoder != null && decoder != null) plan += Triple("硬解 + 硬编", encoder, decoder)
-            if (encoder != null) plan += Triple("软解 + 硬编", encoder, null)
-            if (decoder != null) plan += Triple("硬解 + x264", null, decoder)
-            plan += Triple("x264 软件编码", null, null)
+            val scaleH = options.targetHeight
+                ?.let { minOf(it, srcH) }          // 不放大，只缩小
+                ?.let { if (it % 2 == 1) it - 1 else it }
+            val needScale = scaleH != null && scaleH < srcH
+            val needFps = options.targetFps != null && abs(options.targetFps!! - srcFps) > 0.05
 
-            for ((stage, enc, dec) in plan) {
+            val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+            val outName = "dashcam_$stamp.mp4"
+            val workDir = File(context.cacheDir, "export_${UUID.randomUUID()}").apply { mkdirs() }
+            val outFile = File(workDir, outName)
+
+            try {
+                var ok = false
+                var lastError = ""
+
+                // 校验输出实际时长（部分设备的 mediacodec 会"成功"地输出 0 帧，必须实测）
+                fun outputValid(): Boolean {
+                    if (!outFile.exists() || outFile.length() < 1024) return false
+                    val retriever = android.media.MediaMetadataRetriever()
+                    return try {
+                        retriever.setDataSource(outFile.absolutePath)
+                        val dur = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                        dur >= selDurMs * 8 / 10
+                    } catch (_: Exception) {
+                        false
+                    } finally {
+                        runCatching { retriever.release() }
+                    }
+                }
+
+                if (options.fastCopy) {
+                    val args = buildArgs(entries, scaleH, needScale, needFps, anyAudio, options, null, null, outFile)
+                    ok = runFfmpeg(args, outFile, selDurMs, "流复制", onProgress) && outputValid()
+                    if (!ok) lastError = "快速模式失败（可能不在关键帧上，请用精确模式）"
+                } else {
+                    val encoder: String? = when {
+                        !options.useHw -> null
+                        options.hevc && hw.getOrElse(1) { false } -> "hevc_mediacodec"
+                        !options.hevc && hw.getOrElse(0) { false } -> "h264_mediacodec"
+                        else -> null
+                    }
+                    val decoder = hwDecoderOf(entries, options, hw)
+                    // 从最快组合逐级回退，每级都用实际输出时长验证，避免个别设备静默输出 0 帧
+                    val plan = ArrayList<Triple<String, String?, String?>>()
+                    if (encoder != null && decoder != null) plan += Triple("硬解 + 硬编", encoder, decoder)
+                    if (encoder != null) plan += Triple("软解 + 硬编", encoder, null)
+                    if (decoder != null) plan += Triple("硬解 + x264", null, decoder)
+                    plan += Triple("x264 软件编码", null, null)
+
+                    for ((stage, enc, dec) in plan) {
+                        currentCoroutineContext().ensureActive()
+                        outFile.delete()
+                        onProgress(ExportStats(0f, 0.0, stage))
+                        val args = buildArgs(entries, scaleH, needScale, needFps, anyAudio, options, enc, dec, outFile)
+                        ok = runFfmpeg(args, outFile, selDurMs, stage, onProgress) && outputValid()
+                        if (ok) break
+                    }
+                    if (!ok) lastError = "导出失败（硬编与软件编码均未成功）"
+                }
+
+                if (!ok) {
+                    outFile.delete()
+                    return@withContext Result.failure(IllegalStateException(lastError.ifBlank { "导出失败" }))
+                }
+
+                currentCoroutineContext().ensureActive()
+                onProgress(ExportStats(0.92f, 0.0, "正在保存到相册"))
+                val exportContext = currentCoroutineContext()
+                var savedPercent = -1
+                val uri = MediaStoreSaver.saveVideo(context, outFile, outName) { copied, total ->
+                    exportContext.ensureActive()
+                    val percent = if (total > 0) (copied * 100 / total).toInt() else 0
+                    if (percent != savedPercent) {
+                        savedPercent = percent
+                        onProgress(ExportStats(0.92f + 0.07f * percent / 100f, 0.0, "正在保存到相册（$percent%）"))
+                    }
+                }
+                val size = outFile.length()
                 outFile.delete()
-                onProgress(ExportStats(0f, 0.0, stage))
-                val args = buildArgs(entries, scaleH, needScale, needFps, anyAudio, options, enc, dec, outFile)
-                ok = runFfmpeg(args, selDurMs, stage, onProgress) && outputValid()
-                if (ok) break
+                if (uri == null) {
+                    Result.failure(IllegalStateException("保存到相册失败"))
+                } else {
+                    onProgress(ExportStats(1f, 0.0, "导出完成"))
+                    Result.success(ExportResult(uri, outName, size))
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Result.failure(e)
+            } finally {
+                workDir.deleteRecursively()
             }
-            if (!ok) lastError = "导出失败（硬编与软件编码均未成功）"
-        }
-
-        if (!ok) {
-            outFile.delete()
-            return@withContext Result.failure(IllegalStateException(lastError.ifBlank { "导出失败" }))
-        }
-
-        val uri = MediaStoreSaver.saveVideo(context, outFile, outName)
-        val size = outFile.length()
-        outFile.delete()
-        if (uri == null) {
-            Result.failure(IllegalStateException("保存到相册失败"))
-        } else {
-            Result.success(ExportResult(uri, outName, size))
         }
     }
 
@@ -220,6 +247,7 @@ object ExportEngine {
             )
             if (hwDecoder != null && !options.fastCopy) args += listOf("-c:v", hwDecoder)
             args += listOf("-f", "concat", "-safe", "0", "-i", listFile.absolutePath)
+            args += listOf("-t", Tc.sec(entries.sumOf { it.outMs - it.inMs }))
         }
 
         if (options.fastCopy) {
@@ -242,7 +270,9 @@ object ExportEngine {
             if (anyAudio) args += listOf("-c:a", "aac", "-b:a", "128k")
         }
 
-        args += listOf("-movflags", "+faststart", outFile.absolutePath)
+        // Gallery playback uses a local seekable file. faststart would rewrite the entire
+        // MP4 after encoding, leaving large exports at 100% with no useful progress.
+        args += outFile.absolutePath
         return args.toTypedArray()
     }
 
@@ -269,25 +299,22 @@ object ExportEngine {
 
     private suspend fun runFfmpeg(
         args: Array<String>,
+        output: File,
         durationMs: Long,
         stage: String,
         onProgress: (ExportStats) -> Unit,
-    ): Boolean = suspendCancellableCoroutine { cont ->
-        val session = FFmpegKit.executeWithArgumentsAsync(
-            args,
-            FFmpegSessionCompleteCallback { s ->
-                if (cont.isActive) cont.resume(ReturnCode.isSuccess(s.returnCode))
-            },
-            null,
-            StatisticsCallback { st ->
-                val t = st.time
-                if (durationMs > 0 && t >= 0) {
-                    val p = (t / durationMs.toDouble()).coerceIn(0.0, 1.0).toFloat()
-                    onProgress(ExportStats(p, st.speed, stage))
-                }
-            },
-        )
-        cont.invokeOnCancellation { FFmpegKit.cancel(session.sessionId) }
+    ): Boolean {
+        val session = FfExec.encode(args, output, onStatistics = { st ->
+            val t = st.time
+            if (durationMs > 0 && t >= 0) {
+                val p = (t / durationMs.toDouble()).coerceIn(0.0, 1.0).toFloat()
+                onProgress(ExportStats(p * ENCODING_PROGRESS, st.speed,
+                    if (p >= 0.999f) "$stage · 正在封装视频" else stage))
+            }
+        })
+        if (session == null || !ReturnCode.isSuccess(session.returnCode)) return false
+        onProgress(ExportStats(0.91f, 0.0, "正在校验视频"))
+        return true
     }
 
     fun cancelAll() {

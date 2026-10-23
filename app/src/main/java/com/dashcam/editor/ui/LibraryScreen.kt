@@ -41,6 +41,7 @@ import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.outlined.CleaningServices
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.CircularProgressIndicator
@@ -74,6 +75,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.dashcam.editor.media.MediaLibrary
+import com.dashcam.editor.media.CacheMaintenance
 import com.dashcam.editor.util.Tc
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CompletableDeferred
@@ -100,6 +102,7 @@ fun LibraryScreen(app: AppModel, shareUris: androidx.compose.runtime.MutableStat
     var granted by remember { mutableStateOf(hasVideoPermission(context)) }
     var importing by remember { mutableStateOf(false) }
     var importLabel by remember { mutableStateOf("") }
+    var showCache by remember { mutableStateOf(false) }
     var videos by remember { mutableStateOf<List<LibVideo>>(emptyList()) }
     var infoVideo by remember { mutableStateOf<LibVideo?>(null) }
     var selecting by remember { mutableStateOf(false) }
@@ -198,16 +201,21 @@ fun LibraryScreen(app: AppModel, shareUris: androidx.compose.runtime.MutableStat
         importing = true
         importLabel = ""
         scope.launch {
-            val list = MediaLibrary.import(
-                context,
-                uris,
-                onProgress = { d, t, n -> importLabel = "加载 $d/$t $n" },
-                onError = { e -> scope.launch { snackbar.showSnackbar(e) } },
-            )
-            importing = false
-            if (list.isNotEmpty()) {
-                app.loadClips(list)
-                app.screen = Screen.Edit
+            val cacheOperation = CacheMaintenance.storage.beginOperation()
+            try {
+                val list = MediaLibrary.import(
+                    context,
+                    uris,
+                    onProgress = { d, t, n -> importLabel = "加载 $d/$t $n" },
+                    onError = { e -> scope.launch { snackbar.showSnackbar(e) } },
+                )
+                if (list.isNotEmpty()) {
+                    app.loadClips(list)
+                    app.screen = Screen.Edit
+                }
+            } finally {
+                cacheOperation.close()
+                importing = false
             }
         }
     }
@@ -264,6 +272,8 @@ fun LibraryScreen(app: AppModel, shareUris: androidx.compose.runtime.MutableStat
         }
     }
 
+    if (showCache) CacheCleanupDialog(onDismiss = { showCache = false })
+
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) },
         containerColor = Ios.Background,
@@ -295,6 +305,9 @@ fun LibraryScreen(app: AppModel, shareUris: androidx.compose.runtime.MutableStat
                 if (!selecting) IconButton(modifier = Modifier.padding(start = 6.dp),
                     enabled = !batchBusy && !importing, onClick = { filePicker.launch(arrayOf("video/*")) }) {
                     Icon(Icons.Filled.FolderOpen, "从文件选择（可多选拼接）", tint = Ios.SecondaryLabel, modifier = Modifier.size(22.dp))
+                }
+                if (!selecting) IconButton(enabled = !batchBusy && !importing, onClick = { showCache = true }) {
+                    Icon(Icons.Outlined.CleaningServices, "缓存清理", tint = Ios.SecondaryLabel, modifier = Modifier.size(22.dp))
                 }
             }
 

@@ -89,6 +89,7 @@ import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import com.dashcam.editor.export.ExportEngine
 import com.dashcam.editor.media.MediaLibrary
+import com.dashcam.editor.media.CacheMaintenance
 import com.dashcam.editor.media.PlayerController
 import com.dashcam.editor.shot.FrameShot
 import com.dashcam.editor.shot.ViewportCrop
@@ -106,7 +107,10 @@ fun EditorScreen(app: AppModel, onBack: () -> Unit) {
     val context = LocalContext.current
     val controller = remember(app.clips) { PlayerController(context, app.clips) }
     DisposableEffect(controller) {
-        onDispose { controller.release() }
+        val cacheOperation = CacheMaintenance.storage.beginOperation()
+        onDispose {
+            try { controller.release() } finally { cacheOperation.close() }
+        }
     }
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
@@ -252,6 +256,7 @@ fun EditorScreen(app: AppModel, onBack: () -> Unit) {
                 if (!appending) {
                     appending = true
                     scope.launch {
+                        val cacheOperation = CacheMaintenance.storage.beginOperation()
                         try {
                             val list = MediaLibrary.import(
                                 context, uris,
@@ -267,6 +272,7 @@ fun EditorScreen(app: AppModel, onBack: () -> Unit) {
                                 showInsertPicker = false
                             }
                         } finally {
+                            cacheOperation.close()
                             appending = false
                         }
                     }

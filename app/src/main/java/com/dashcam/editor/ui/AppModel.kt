@@ -7,6 +7,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.ImageBitmap
 import com.dashcam.editor.media.ClipInfo
+import com.dashcam.editor.media.CacheMaintenance
+import java.io.File
 
 enum class Screen { Library, Edit }
 
@@ -21,7 +23,16 @@ data class ShotItem(
 
 /** 全局应用状态。Activity 因 configChanges 不重建，remember 住即可在横竖屏切换时保留 */
 class AppModel {
-    var clips by mutableStateOf<List<ClipInfo>>(emptyList())
+    private val cacheOwner = Any()
+    private var clipState by mutableStateOf<List<ClipInfo>>(emptyList())
+    var clips: List<ClipInfo>
+        get() = clipState
+        set(value) {
+            CacheMaintenance.storage.setSession(cacheOwner, value.map { File(it.filePath) })
+            clipState = value
+        }
+
+    fun releaseCache() = CacheMaintenance.storage.setSession(cacheOwner, emptyList())
     var screen by mutableStateOf(Screen.Library)
     var inMs by mutableLongStateOf(0L)
     var outMs by mutableLongStateOf(0L)
