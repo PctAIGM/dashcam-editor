@@ -557,6 +557,9 @@ internal fun hasVideoPermission(context: Context): Boolean {
     }
 }
 
+/** 部分 ROM 会把动态照片伴随视频等非普通视频混进视频集合；图片扩展名按名兜底排除 */
+private val IMAGE_EXTENSIONS = arrayOf("jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "bmp")
+
 internal suspend fun loadVideos(context: Context): List<LibVideo> = withContext(Dispatchers.IO) {
     runCatching {
         val list = ArrayList<LibVideo>()
@@ -565,10 +568,10 @@ internal suspend fun loadVideos(context: Context): List<LibVideo> = withContext(
             arrayOf(
                 MediaStore.Video.Media._ID, MediaStore.Video.Media.DURATION, MediaStore.Video.Media.DATE_ADDED,
                 MediaStore.Video.Media.DISPLAY_NAME, MediaStore.Video.Media.WIDTH, MediaStore.Video.Media.HEIGHT,
-                MediaStore.Video.Media.SIZE,
+                MediaStore.Video.Media.SIZE, MediaStore.Video.Media.MIME_TYPE,
             ),
-            null,
-            null,
+            "${MediaStore.Video.Media.MIME_TYPE} LIKE ?",
+            arrayOf("video/%"),
             "${MediaStore.Video.Media.DATE_ADDED} DESC",
         )?.use { cursor ->
             val idCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media._ID)
@@ -578,14 +581,19 @@ internal suspend fun loadVideos(context: Context): List<LibVideo> = withContext(
             val widthCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.WIDTH)
             val heightCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.HEIGHT)
             val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.SIZE)
+            val mimeCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.MIME_TYPE)
             while (cursor.moveToNext()) {
+                val name = cursor.getString(nameCol) ?: "视频"
+                val imageLike = IMAGE_EXTENSIONS.any { name.endsWith(".$it", ignoreCase = true) }
+                val isVideoMime = cursor.getString(mimeCol)?.startsWith("video/", ignoreCase = true) == true
+                if (imageLike || !isVideoMime) continue
                 val id = cursor.getLong(idCol)
                 list.add(
                     LibVideo(
                         uri = ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id),
                         durationMs = cursor.getLong(durCol),
                         dateAdded = cursor.getLong(dateCol),
-                        displayName = cursor.getString(nameCol) ?: "视频",
+                        displayName = name,
                         width = cursor.getInt(widthCol),
                         height = cursor.getInt(heightCol),
                         sizeBytes = cursor.getLong(sizeCol),
