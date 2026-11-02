@@ -76,13 +76,15 @@ fun ExportSheet(
     var fastCopy by remember { mutableStateOf(preferences.getBoolean("fastCopy", false)) }
     var useHw by remember { mutableStateOf(preferences.getBoolean("useHw", true)) }
     var hwDecode by remember { mutableStateOf(preferences.getBoolean("hwDecode", true)) }
+    var keepAudio by remember { mutableStateOf(preferences.getBoolean("keepAudio", true)) }
     var exporting by remember { mutableStateOf(false) }
     var advanced by remember { mutableStateOf(false) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true, confirmValueChange = { !exporting })
-    LaunchedEffect(resSel, fpsSel, quality, hevc, fastCopy, useHw, hwDecode) {
+    LaunchedEffect(resSel, fpsSel, quality, hevc, fastCopy, useHw, hwDecode, keepAudio) {
         preferences.edit().putInt("resolution", resSel).putInt("fps", fpsSel).putInt("quality", quality.ordinal)
             .putBoolean("hevc", hevc).putBoolean("fastCopy", fastCopy)
-            .putBoolean("useHw", useHw).putBoolean("hwDecode", hwDecode).apply()
+            .putBoolean("useHw", useHw).putBoolean("hwDecode", hwDecode)
+            .putBoolean("keepAudio", keepAudio).apply()
     }
     var progress by remember { mutableFloatStateOf(0f) }
     var speed by remember { mutableDoubleStateOf(0.0) }
@@ -91,7 +93,9 @@ fun ExportSheet(
     var result by remember { mutableStateOf<ExportResult?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
 
-    val entriesCount = ExportEngine.selectionEntries(app.clips, app.inMs, app.outMs).size
+    val selEntries = ExportEngine.selectionEntries(app.clips, app.inMs, app.outMs)
+    val entriesCount = selEntries.size
+    val selHasAudio = selEntries.any { it.clip.hasAudio }
     val srcHeight = app.clips.firstOrNull()?.displayHeight ?: 0
     val selDurMs = app.outMs - app.inMs
     val hwEncoderAvailable = hw.getOrElse(0) { false } || hw.getOrElse(1) { false }
@@ -120,6 +124,13 @@ fun ExportSheet(
                     Text(if (fastCopy) "速度快，剪切点按关键帧对齐，保留原始分辨率与帧率。" else "按选区精确裁剪，可调整输出画质。",
                         modifier = Modifier.padding(horizontal = Ios.Gutter).padding(bottom = 12.dp),
                         style = MaterialTheme.typography.bodySmall, color = Ios.SecondaryLabel)
+                    IosSeparator()
+                    SwitchCell(
+                        title = "保留声音",
+                        detail = if (selHasAudio) "关闭后导出无声视频" else "选区内没有音轨",
+                        checked = keepAudio && selHasAudio,
+                        enabled = selHasAudio && !exporting, onCheckedChange = { keepAudio = it },
+                    )
                 }
                 IosGroup {
                     PickerCell("分辨率", RES_LABELS, resSel, enabled = !fastCopy && !exporting) { resSel = it }
@@ -193,6 +204,7 @@ fun ExportSheet(
                                 targetHeight = RES_OPTIONS[resSel], targetFps = FPS_OPTIONS[fpsSel], quality = quality,
                                 useHw = useHw && hwEncoderAvailable, hevc = hevc && useHw && hw.getOrElse(1) { false },
                                 fastCopy = fastCopy, hwDecode = hwDecode && hwDecoderAvailable,
+                                keepAudio = keepAudio,
                             )
                             job = scope.launch {
                                 try {

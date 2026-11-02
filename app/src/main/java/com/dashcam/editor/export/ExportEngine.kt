@@ -31,6 +31,8 @@ data class ExportOptions(
     val fastCopy: Boolean = false,
     /** MediaCodec 硬解码：4K 片源解码本身就很吃 CPU，开启后由 GPU/DSP 解 */
     val hwDecode: Boolean = true,
+    /** 导出是否保留声音；关闭后输出无声视频（两种裁剪模式均生效） */
+    val keepAudio: Boolean = true,
 )
 
 data class ExportResult(val uri: Uri, val displayName: String, val sizeBytes: Long)
@@ -250,8 +252,10 @@ object ExportEngine {
             args += listOf("-t", Tc.sec(entries.sumOf { it.outMs - it.inMs }))
         }
 
+        val wantAudio = anyAudio && options.keepAudio
         if (options.fastCopy) {
             args += listOf("-c", "copy", "-avoid_negative_ts", "make_zero")
+            if (!wantAudio) args += "-an"
         } else {
             if (needScale && scaleH != null) args += listOf("-vf", "scale=-2:$scaleH")
             if (needFps && options.targetFps != null) args += listOf("-r", options.targetFps.toString())
@@ -267,7 +271,7 @@ object ExportEngine {
             } else {
                 args += listOf("-c:v", "libx264", "-preset", x264Preset(outH), "-crf", crfOf(options.quality).toString())
             }
-            if (anyAudio) args += listOf("-c:a", "aac", "-b:a", "128k")
+            if (wantAudio) args += listOf("-c:a", "aac", "-b:a", "128k") else args += "-an"
         }
 
         // Gallery playback uses a local seekable file. faststart would rewrite the entire
